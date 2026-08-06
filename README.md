@@ -1,0 +1,48 @@
+# LinkCli
+
+LinkCli 是企业内部标准 MCP 聚合网关。项目负责人登记已有的 Streamable HTTP MCP 服务，平台完成工具发现、版本审核、探活与发布；外部 Agent 使用一个平台凭据即可列出和调用全部已发布、健康且未暂停的工具。
+
+第一阶段只支持标准 MCP Streamable HTTP，不接入命令行进程或任意脚本。平台不做项目级、工具级差异授权：有效平台凭据可以访问全部可用工具，项目 MCP 根据平台配置的项目 Token 自行完成业务数据权限判断。
+
+## 本地启动
+
+要求 Node.js 20+ 和 MySQL 8.0+。
+
+```bash
+npm install
+cp .env.example .env
+# 设置 DATABASE_URL、ADMIN_API_KEY 和 PROJECT_CREDENTIAL_KEY
+set -a && source .env && set +a
+npm run db:init
+npm run dev
+```
+
+`npm run db:init` 只用于全新空库。`src/db/schema.sql` 是当前 SQL 真值源，不应对已有库重复执行。
+
+## 接口
+
+- `GET /healthz`：进程健康检查。
+- `/admin/*`：登记、版本、审核、项目状态和平台凭据管理。请求必须携带 `x-admin-api-key`、`x-platform-user-id` 和 `x-platform-role`。
+- `/mcp`：标准 MCP Streamable HTTP 入口，使用 `Authorization: Bearer <platform-token>`。
+
+管理接口和状态规则详见 [架构说明](docs/architecture.md)。
+
+## 验证
+
+```bash
+npm run typecheck
+npm test
+npm run build
+npm run check
+```
+
+自动化测试使用内存仓库和确定性 MCP 替身，并包含真实 Streamable HTTP 协议边界测试。它们不证明目标 MySQL 实例、真实项目 MCP 或 L2 采集服务已经就绪。
+
+连接专用开发数据库执行真实 MySQL + 标准 MCP 端到端联调：
+
+```bash
+set -a && source .env.development.local && set +a
+npm run test:mysql
+```
+
+该测试只接受库名以 `_dev` 或 `_test` 结尾的显式 `LINKCLI_TEST_MYSQL_URL`，执行前后会清空 LinkCli 六张表，不得指向共享业务库或生产库。

@@ -1,0 +1,30 @@
+{
+  "name": "linkcli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/main.js",
+    "build": "tsc -p tsconfig.build.json",
+    "db:init": "node scripts/db/apply-schema.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:mysql": "vitest run tests/mysql-e2e.integration.test.ts",
+    "check": "npm run typecheck && npm test && npm run build",
+    "spec": "python3 scripts/spec/flow_guard.py"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "express": "5.1.0",
+    "mysql2": "3.14.3",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@types/express": "5.0.3",
+    "@types/node": "22.18.0",
+    "tsx": "4.20.5",
+    "typescript": "5.9.2",
+    "vitest": "3.2.4"
+  }
+}
