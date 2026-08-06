@@ -1,5 +1,6 @@
 export type ErrorCode =
   | "AUTHENTICATION_FAILED"
+  | "AUTHENTICATION_REQUIRED"
   | "AUTHORIZATION_FAILED"
   | "CONFLICT"
   | "DOWNSTREAM_AUTH_FAILED"
@@ -7,10 +8,13 @@ export type ErrorCode =
   | "DOWNSTREAM_PROTOCOL_ERROR"
   | "DOWNSTREAM_TIMEOUT"
   | "INVALID_INPUT"
+  | "INVALID_ORIGIN"
   | "INVALID_STATE"
   | "NOT_FOUND"
+  | "RATE_LIMITED"
   | "SERVICE_UNAVAILABLE"
-  | "TOOL_VERSION_STALE";
+  | "TOOL_VERSION_STALE"
+  | "USERNAME_TAKEN";
 
 export class AppError extends Error {
   constructor(

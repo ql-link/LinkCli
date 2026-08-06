@@ -1,4 +1,6 @@
 import { createPool } from "mysql2/promise";
+import { MySqlIdentityRepository } from "./auth/repository.js";
+import { IdentityService } from "./auth/service.js";
 import { createApp } from "./app.js";
 import { BoundedDispatcher, HttpEnvelopeSink, NoopEnvelopeSink } from "./collection/dispatcher.js";
 import { loadConfig } from "./config.js";
@@ -19,6 +21,7 @@ async function main(): Promise<void> {
   const pool = createPool({ uri: config.DATABASE_URL, connectionLimit: 10, timezone: "Z", dateStrings: false });
   await pool.query("SELECT 1");
   const repository = new MySqlRegistryRepository(pool, pool);
+  const identity = new IdentityService(new MySqlIdentityRepository(pool));
   const connector = new SdkMcpConnector();
   const cipher = new ProjectCredentialCipher(config.PROJECT_CREDENTIAL_KEY, config.PROJECT_CREDENTIAL_KEY_ID);
   const events = config.L4_EVENT_ENDPOINT ? new HttpRegistryEventSink(config.L4_EVENT_ENDPOINT) : new NoopRegistryEventSink();
@@ -31,7 +34,10 @@ async function main(): Promise<void> {
   const sink = config.L2_ENDPOINT ? new HttpEnvelopeSink(config.L2_ENDPOINT) : new NoopEnvelopeSink();
   const dispatcher = new BoundedDispatcher(sink, config.L2_QUEUE_CAPACITY);
   const gateway = new GatewayRouter(repository, catalog, connector, cipher, health, dispatcher, config.MCP_CALL_TIMEOUT_MS);
-  const app = createApp({ projects, reviews, health, credentials, catalog, gateway }, config.ADMIN_API_KEY, config.HOST, config.MCP_ALLOWED_HOSTS);
+  const app = createApp(
+    { projects, reviews, health, credentials, catalog, gateway }, config.ADMIN_API_KEY, config.HOST, config.MCP_ALLOWED_HOSTS,
+    { identity, repository, projects, reviews, health, credentials }, config.WEB_DIST_DIR, config.NODE_ENV === "production",
+  );
   const server = app.listen(config.PORT, config.HOST, () => { console.info(`LinkCli listening on http://${config.HOST}:${config.PORT}`); });
   const healthTimer = setInterval(() => { void health.probeActiveProjects(); void health.emitStaleAlerts(); }, Math.min(config.HEALTH_STALE_AFTER_MS / 2, 30_000));
   healthTimer.unref();

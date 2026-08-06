@@ -98,3 +98,33 @@ CREATE TABLE mcp_call_credentials (
   KEY idx_mcp_call_credentials_owner_created (owner_id, created_at),
   CONSTRAINT ck_mcp_call_credentials_expiry CHECK (expires_at IS NULL OR expires_at > created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='统一网关调用凭据';
+
+CREATE TABLE platform_users (
+  id CHAR(36) NOT NULL COMMENT '平台账号 UUID',
+  username VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT '全局唯一且不可修改的登录用户名',
+  display_name VARCHAR(120) NOT NULL COMMENT '账号展示名称',
+  password_hash VARCHAR(255) NOT NULL COMMENT 'Argon2id 密码摘要',
+  role VARCHAR(16) NOT NULL DEFAULT 'member' COMMENT 'member/reviewer/operator',
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT 'UTC 创建时间',
+  updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6) COMMENT 'UTC 更新时间',
+  CONSTRAINT pk_platform_users PRIMARY KEY (id),
+  CONSTRAINT uk_platform_users_username UNIQUE (username),
+  KEY idx_platform_users_role_created (role, created_at, id),
+  CONSTRAINT ck_platform_users_role CHECK (role IN ('member', 'reviewer', 'operator'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='LinkCli 控制台账号';
+
+CREATE TABLE platform_sessions (
+  id CHAR(36) NOT NULL COMMENT '登录会话 UUID',
+  user_id CHAR(36) NOT NULL COMMENT '所属平台账号',
+  token_digest BINARY(32) NOT NULL COMMENT '会话令牌 SHA-256 摘要',
+  expires_at DATETIME(6) NOT NULL COMMENT 'UTC 滑动过期时间',
+  last_seen_at DATETIME(6) NOT NULL COMMENT 'UTC 最近有效访问时间',
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT 'UTC 创建时间',
+  revoked_at DATETIME(6) NULL COMMENT 'UTC 主动注销时间',
+  CONSTRAINT pk_platform_sessions PRIMARY KEY (id),
+  CONSTRAINT uk_platform_sessions_token_digest UNIQUE (token_digest),
+  KEY idx_platform_sessions_user_created (user_id, created_at, id),
+  KEY idx_platform_sessions_expiry (expires_at),
+  CONSTRAINT ck_platform_sessions_expiry CHECK (expires_at > created_at),
+  CONSTRAINT fk_platform_sessions_user FOREIGN KEY (user_id) REFERENCES platform_users (id) ON UPDATE RESTRICT ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='LinkCli 控制台登录会话';

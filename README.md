@@ -19,9 +19,19 @@ npm run dev
 
 `npm run db:init` 只用于全新空库。`src/db/schema.sql` 是当前 SQL 真值源，不应对已有库重复执行。
 
+已有 L1 数据库升级控制台所需的账号与会话表：
+
+```bash
+npm run db:upgrade:console
+npm run admin:bootstrap -- --username operator --display-name "平台运营"
+```
+
+第二条命令从终端读取首个运营管理员密码，不要把密码放进命令参数。`npm run dev` 同时启动 API 和 Vite 控制台；生产构建由 Express 同域托管 `web/dist`。
+
 ## 接口
 
 - `GET /healthz`：进程健康检查。
+- `/api/*`：控制台登录会话和页面接口，浏览器使用 HttpOnly Cookie，不接触部署级管理密钥。
 - `/admin/*`：登记、版本、审核、项目状态和平台凭据管理。请求必须携带 `x-admin-api-key`、`x-platform-user-id` 和 `x-platform-role`。
 - `/mcp`：标准 MCP Streamable HTTP 入口，使用 `Authorization: Bearer <platform-token>`。
 
@@ -31,6 +41,7 @@ npm run dev
 
 ```bash
 npm run typecheck
+npm run typecheck:web
 npm test
 npm run build
 npm run check
@@ -45,4 +56,4 @@ set -a && source .env.development.local && set +a
 npm run test:mysql
 ```
 
-该测试只接受库名以 `_dev` 或 `_test` 结尾的显式 `LINKCLI_TEST_MYSQL_URL`，执行前后会清空 LinkCli 六张表，不得指向共享业务库或生产库。
+该测试只接受库名以 `_dev` 或 `_test` 结尾的显式 `LINKCLI_TEST_MYSQL_URL`，执行前后会清空测试范围内的 LinkCli 表，不得指向共享业务库或生产库。

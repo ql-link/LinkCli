@@ -97,3 +97,25 @@ export interface PlatformIdentity {
   userId: string;
   role: "owner" | "reviewer" | "operator" | "platform_user";
 }
+
+export type UserRole = "member" | "reviewer" | "operator";
+
+export interface PlatformUser {
+  id: string;
+  username: string;
+  displayName: string;
+  passwordHash: string;
+  role: UserRole;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface PlatformSession {
+  id: string;
+  userId: string;
+  tokenDigest: Buffer;
+  expiresAt: Date;
+  lastSeenAt: Date;
+  createdAt: Date;
+  revokedAt: Date | null;
+}

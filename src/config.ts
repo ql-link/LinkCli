@@ -16,6 +16,7 @@ const schema = z.object({
   L2_ENDPOINT: z.string().url().optional(),
   L4_EVENT_ENDPOINT: z.string().url().optional(),
   L2_QUEUE_CAPACITY: z.coerce.number().int().positive().default(1_000),
+  WEB_DIST_DIR: z.string().min(1).default("web/dist"),
 });
 
 export type AppConfig = z.infer<typeof schema>;

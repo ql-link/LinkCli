@@ -1,0 +1,110 @@
+@import "@fontsource-variable/geist";
+@import "tailwindcss";
+
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, "Geist Variable", "Segoe UI", sans-serif;
+  color: #1d1d1f;
+  background: #f5f5f7;
+  font-synthesis: none;
+  --ink: #1d1d1f;
+  --canvas: #f5f5f7;
+  --surface: #ffffff;
+  --surface-tint: #fbfbfc;
+  --muted: #6e6e73;
+  --subtle: #8a8a8e;
+  --hairline: #d2d2d7;
+  --card-border: #e3e3e6;
+  --error: #ff3b30;
+  --success: #34c759;
+  --warning: #d68f00;
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+  --ease-standard: cubic-bezier(.16, 1, .3, 1);
+}
+
+* { box-sizing: border-box; }
+html, body, #root { min-width: 320px; min-height: 100%; }
+body { margin: 0; min-height: 100vh; background: var(--canvas); color: var(--ink); }
+button, input, textarea, select { font: inherit; color: inherit; }
+button, a { -webkit-tap-highlight-color: transparent; }
+button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+
+.grain { display: none; }
+
+.panel {
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .035);
+}
+.panel-interactive { transition: transform .22s var(--ease-standard), box-shadow .22s var(--ease-standard); }
+.panel-interactive:hover { transform: translateY(-3px); box-shadow: 0 6px 20px rgba(0, 0, 0, .08); }
+
+.field {
+  width: 100%;
+  min-height: 44px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  padding: .7rem .85rem;
+  outline: 0;
+  transition: border-color .1s ease, box-shadow .1s ease;
+}
+.field::placeholder { color: #aeaeb2; }
+.field:hover { border-color: #aeaeb2; }
+.field:focus { border-color: var(--ink); box-shadow: 0 0 0 3px rgba(0, 0, 0, .06); }
+
+.btn-primary, .btn-secondary, .btn-danger {
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border-radius: var(--radius-md);
+  padding: 0 20px;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+  transition: transform .1s ease, background .1s ease, border-color .1s ease;
+}
+.btn-primary { border: 1px solid var(--ink); background: var(--ink); color: #fff; }
+.btn-primary:hover { background: #3a3a3c; }
+.btn-secondary { border: 1px solid var(--hairline); background: var(--surface); color: var(--ink); }
+.btn-secondary:hover { border-color: #aeaeb2; background: #eeeef0; }
+.btn-danger { border: 0; background: transparent; color: var(--error); }
+.btn-danger:hover { background: rgba(255, 59, 48, .08); }
+.btn-primary:active, .btn-secondary:active, .btn-danger:active { transform: scale(.97); }
+
+.eyebrow { color: var(--muted); font-size: 12px; font-weight: 500; letter-spacing: 0; text-transform: none; }
+
+.status {
+  display: inline-flex;
+  height: 28px;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--card-border);
+  border-radius: 999px;
+  background: var(--surface-tint);
+  padding: 0 10px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #8e8e93; }
+.status.active::before, .status.healthy::before, .status.approved::before, .status.member::before { background: var(--success); }
+.status.unhealthy::before, .status.rejected::before, .status.retired::before, .status.revoked::before, .status.high::before { background: var(--error); }
+.status.pending::before, .status.pending_review::before, .status.draft::before, .status.medium::before, .status.reviewer::before { background: var(--warning); }
+.status.operator::before, .status.low::before { background: var(--ink); }
+
+.data-table { width: 100%; border-collapse: collapse; }
+.data-table th { padding: 11px 16px; text-align: left; color: var(--muted); font-size: 12px; font-weight: 500; }
+.data-table td { padding: 14px 16px; border-top: 1px solid var(--card-border); vertical-align: middle; }
+.data-table tbody tr { transition: background .1s ease; }
+.data-table tbody tr:hover { background: var(--surface-tint); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}

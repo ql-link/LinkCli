@@ -1,0 +1,3 @@
+export class ApiError extends Error { constructor(public code:string,message:string,public status:number,public details?:unknown){super(message);} }
+export async function api<T>(path:string,init:RequestInit={}):Promise<T>{const response=await fetch(path,{...init,headers:{...(init.body?{"content-type":"application/json"}:{}),...init.headers},credentials:"same-origin"});if(response.status===204)return undefined as T;const body=await response.json().catch(()=>({}));if(!response.ok)throw new ApiError(body.error?.code??"REQUEST_FAILED",body.error?.message??"请求失败",response.status,body.error?.details);return body.data as T;}
+export const json=(method:string,body?:unknown):RequestInit=>({method,body:body===undefined?undefined:JSON.stringify(body)});
