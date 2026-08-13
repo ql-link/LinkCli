@@ -11,7 +11,7 @@ LinkCli 是企业内部标准 MCP 聚合网关。项目负责人登记已有的 
 ```bash
 npm install
 cp .env.example .env
-# 设置 DATABASE_URL、ADMIN_API_KEY 和 PROJECT_CREDENTIAL_KEY
+# 设置 DATABASE_URL、ADMIN_API_KEY、PROJECT_CREDENTIAL_KEY 和 COLLECTION_FINGERPRINT_KEY
 set -a && source .env && set +a
 npm run db:init
 npm run dev
@@ -38,8 +38,11 @@ npm run db:upgrade:analysis
 
 - `GET /healthz`：进程健康检查。
 - `/api/*`：控制台登录会话和页面接口，浏览器使用 HttpOnly Cookie，不接触部署级管理密钥。
+- `/api/statistics/*`：按项目可见性查询调用、工具和轮次统计；调用问题与明细默认保留 90 天。
 - `/admin/*`：登记、版本、审核、项目状态和平台凭据管理。请求必须携带 `x-admin-api-key`、`x-platform-user-id` 和 `x-platform-role`。
 - `/mcp`：标准 MCP Streamable HTTP 入口，使用 `Authorization: Bearer <platform-token>`。
+
+为了精确记录“一轮用户输入触发的多次 MCP 调用”，宿主应在同一轮所有 `tools/call` 的 `_meta` 中传入相同的 `com.tolink.stats/conversation-id` 和 `com.tolink.stats/turn-id`。工具定义要求携带 `__linkcli_user_question`，用于问题下钻和未适配宿主的空闲窗口兼容推断；该字段不会传给下游 MCP。
 
 L3 Query 分析不在 `/mcp` 实时链路中执行。L2 将一轮已结算 Query 写入 `mcp_analysis_input` 后，L3 定时批量提取有序 MCP 模块路径、聚类 Query、归纳组内操作场景并统计门槛；达标结果写入 `mcp_l4_candidate_outbox`，由 L4 后续生成或扩展 Skill。
 

@@ -1,14 +1,21 @@
-import type { CatalogEntry, JsonObject } from "../domain.js";
+import type { CatalogEntry, JsonObject, TransportSessionSource } from "../domain.js";
 import type { RegistryRepository } from "../db/repository.js";
 import { AppError, assertFound } from "../errors.js";
 import type { ProjectCredentialCipher } from "../security/project-credential.js";
-import type { BoundedDispatcher } from "../collection/dispatcher.js";
-import { createEnvelope } from "../collection/envelope.js";
+import type { CollectionRepository } from "../collection/repository.js";
+import { createEventId, summarize } from "../collection/envelope.js";
+import { resolveAttribution } from "../collection/context.js";
 import type { McpConnector, ToolCallResult } from "../registry/connector.js";
 import type { HealthMonitor } from "../registry/health-monitor.js";
 import { CatalogService, USER_QUESTION_FIELD } from "./catalog.js";
 
-export interface CallContext { platformOwnerId: string; sessionId: string; callSequence: number; }
+export interface CallContext {
+  platformOwnerId: string;
+  credentialId: string;
+  transportSessionId: string | null;
+  transportSessionSource?: TransportSessionSource;
+  meta?: Record<string, unknown>;
+}
 
 export class GatewayRouter {
   constructor(
@@ -17,28 +24,48 @@ export class GatewayRouter {
     private readonly connector: McpConnector,
     private readonly cipher: ProjectCredentialCipher,
     private readonly health: HealthMonitor,
-    private readonly dispatcher: BoundedDispatcher,
+    private readonly collection: CollectionRepository,
+    private readonly fingerprintKey: Buffer,
     private readonly timeoutMs: number,
   ) {}
 
   async call(publicName: string, arguments_: JsonObject, context: CallContext): Promise<ToolCallResult> {
-    const question = arguments_[USER_QUESTION_FIELD];
-    if (typeof question !== "string" || !question.trim()) throw new AppError("INVALID_INPUT", `${USER_QUESTION_FIELD} is required`, 400);
+    const credentialId = context.credentialId;
+    const transportSessionId = context.transportSessionId;
+    const attribution = resolveAttribution({ credentialId, transportSessionId, transportSessionSource: context.transportSessionSource, arguments: arguments_, meta: context.meta, fingerprintKey: this.fingerprintKey });
     const entry = await this.resolve(publicName);
     const businessArguments = { ...arguments_ }; delete businessArguments[USER_QUESTION_FIELD];
     const token = this.cipher.decrypt(entry.version.credentialCiphertext);
-    const started = Date.now();
+    const eventId = createEventId();
+    const startedAt = new Date();
     try {
-      const result = await this.connector.callTool(entry.version.endpoint, token, entry.tool.originalName, businessArguments, this.timeoutMs);
-      await this.health.recordCallResult(entry.project.id, !result.isError);
-      this.dispatcher.enqueue(createEnvelope({ ...context, projectKey: entry.project.projectKey, toolName: entry.tool.originalName, userQuestion: question, arguments: businessArguments, result, outcome: result.isError ? "error" : "success", durationMs: Date.now() - started }));
-      return result;
+      await this.collection.beginCall({ id: eventId, platformOwnerId: context.platformOwnerId, credentialId, projectId: entry.project.id, serviceVersionId: entry.version.id, toolVersionId: entry.tool.id,
+        projectKey: entry.project.projectKey, toolName: entry.tool.originalName, argumentsSummary: summarize(businessArguments), attribution, startedAt });
+    } catch {
+      throw new AppError("COLLECTION_UNAVAILABLE", "Call collection is temporarily unavailable", 503);
+    }
+    let result: ToolCallResult;
+    try {
+      result = await this.connector.callTool(entry.version.endpoint, token, entry.tool.originalName, businessArguments, this.timeoutMs);
     } catch (error) {
-      await this.health.recordCallResult(entry.project.id, false);
+      const completedAt = new Date();
       const safeError = error instanceof AppError ? { code: error.code, message: error.message } : { code: "DOWNSTREAM_PROTOCOL_ERROR", message: "Downstream MCP error" };
-      this.dispatcher.enqueue(createEnvelope({ ...context, projectKey: entry.project.projectKey, toolName: entry.tool.originalName, userQuestion: question, arguments: businessArguments, result: safeError, outcome: "error", durationMs: Date.now() - started }));
+      try {
+        await this.collection.completeCall(eventId, { resultSummary: summarize(safeError), outcome: "error", errorCode: safeError.code, completedAt, durationMs: completedAt.getTime() - startedAt.getTime() });
+      } catch {
+        await this.collection.markCallPartial(eventId, "COLLECTION_COMPLETION_WRITE_FAILED", completedAt).catch(() => undefined);
+      }
+      await this.health.recordCallResult(entry.project.id, false).catch(() => undefined);
       throw error;
     }
+    const completedAt = new Date();
+    try {
+      await this.collection.completeCall(eventId, { resultSummary: summarize(result), outcome: result.isError ? "error" : "success", errorCode: result.isError ? "DOWNSTREAM_TOOL_ERROR" : null, completedAt, durationMs: completedAt.getTime() - startedAt.getTime() });
+    } catch {
+      await this.collection.markCallPartial(eventId, "COLLECTION_COMPLETION_WRITE_FAILED", completedAt).catch(() => undefined);
+    }
+    await this.health.recordCallResult(entry.project.id, !result.isError).catch(() => undefined);
+    return result;
   }
 
   private async resolve(publicName: string): Promise<CatalogEntry> {

@@ -12,12 +12,12 @@ describe("atomic version switching", () => {
       if (endpoint === first.version.endpoint) await gate;
       return originalCall(endpoint, token, name, arguments_, timeout);
     };
-    const inFlight = h.gateway.call("knowledge__search", { query: "old", [USER_QUESTION_FIELD]: "旧调用" }, { platformOwnerId: "a", sessionId: "s", callSequence: 1 });
+    const inFlight = h.gateway.call("knowledge__search", { query: "old", [USER_QUESTION_FIELD]: "旧调用" }, { platformOwnerId: "a", credentialId: "credential", transportSessionId: "s" });
     await Promise.resolve();
     h.connector.add("http://project.test/v2", [searchTool("v2")]);
     const candidate = await h.projects.createVersion({ projectKey: "knowledge", endpoint: "http://project.test/v2", projectToken: "project-token", submittedBy: "owner-1" });
     await h.reviews.submit(candidate.version.id, "owner-1"); await approve(h, candidate.version.id);
-    const newCall = await h.gateway.call("knowledge__search", { query: "new", [USER_QUESTION_FIELD]: "新调用" }, { platformOwnerId: "a", sessionId: "s", callSequence: 2 });
+    const newCall = await h.gateway.call("knowledge__search", { query: "new", [USER_QUESTION_FIELD]: "新调用" }, { platformOwnerId: "a", credentialId: "credential", transportSessionId: "s" });
     release(); await inFlight;
     expect(newCall.content).toBeDefined();
     expect(oldState.calls).toHaveLength(1);
