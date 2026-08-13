@@ -10,9 +10,14 @@ describe("startup configuration", () => {
   });
 
   it("accepts a complete configuration and decodes a 32-byte key", () => {
-    const config = loadConfig({ NODE_ENV: "test", DATABASE_URL: "mysql://localhost/linkcli", ADMIN_API_KEY: "admin-key-with-at-least-24-chars", PROJECT_CREDENTIAL_KEY: testKey });
+    const config = loadConfig({ NODE_ENV: "test", DATABASE_URL: "mysql://localhost/linkcli", ADMIN_API_KEY: "admin-key-with-at-least-24-chars", PROJECT_CREDENTIAL_KEY: testKey, COLLECTION_FINGERPRINT_KEY: Buffer.alloc(32, 8).toString("base64") });
     expect(config.PORT).toBe(3000);
     expect(config.PROJECT_CREDENTIAL_KEY_ID).toBe("v1");
+    expect(config.COLLECTION_DETAIL_RETENTION_DAYS).toBe(90);
+  });
+
+  it("requires an independent collection fingerprint key", () => {
+    expect(() => loadConfig({ NODE_ENV: "test", DATABASE_URL: "mysql://localhost/linkcli", ADMIN_API_KEY: "admin-key-with-at-least-24-chars", PROJECT_CREDENTIAL_KEY: testKey, COLLECTION_FINGERPRINT_KEY: testKey })).toThrow(/must be independent/);
   });
 
   it("preserves the browser host through the development proxy for same-origin writes", () => {

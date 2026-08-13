@@ -2,27 +2,39 @@ schema_version: 7
 key: MCPSTAT-1-L2
 title: ''
 source_issue: https://wcnnpvbxd7li.feishu.cn/docx/Xaq0dxMk1oi1s6xIXNpc81a5nSh
-route: null
-phase: solution
+route: acceptance_first
+phase: release_ready
 artifacts:
   solution:
     file: solution.md
-    frozen: false
-    sha256: null
+    frozen: true
+    sha256: 728c7c80d090936b5c830c31edd15eb96531f30b93d935d5690fd5bb27a73196
   acceptance:
     file: acceptance.feature
-    frozen: false
-    sha256: null
+    frozen: true
+    sha256: 6226c62631e41bcc1c121125bf044cd5c7327b9867227dc3952303c7aa5648d0
 verification:
-  verified: false
-  commands: []
-  code_snapshot: null
+  verified: true
+  commands:
+  - command: npm run check
+    exit_code: 0
+    duration_ms: 18725
+    finished_at: '2026-08-12T17:02:26+00:00'
+  code_snapshot:
+    sha256: 57db809754ede74fb106409c83d8e49a7e8d30dbf93199131d6c006645980c36
+    file_count: 120
+    head: d507fdaa400b903a8d5ca69d59119cb25a6cd2e2
+    captured_at: '2026-08-12T17:02:26+00:00'
   manual_acceptance: null
-  verified_at: null
+  verified_at: '2026-08-12T17:02:26+00:00'
 quality_review:
-  passed: false
-  evidence: []
-  code_snapshot_sha256: null
-  reviewed_at: null
+  passed: true
+  evidence:
+  - 已修复影响当前业务的阻断问题：MySQL 兼容首轮并发归组使用数据库级候选锁，调用错误分类独立持久化，问题保留原文且仅规范化用于 HMAC，规范链显式记录并行组，分析
+    Outbox 只接收 trusted/inferred 完整轮次，结算失败隔离退避，统计响应隐藏内部指纹；冻结 DDL 与 schema 一致。隔离 MySQL
+    8.0.42 建库成功，npm run check 含 71 个测试全部通过。全量统计 SQL 下推和 L3 Outbox 外部消费者属于当前规模下的后续性能与下阶段工作，不阻断
+    L2 采集统计。
+  code_snapshot_sha256: 57db809754ede74fb106409c83d8e49a7e8d30dbf93199131d6c006645980c36
+  reviewed_at: '2026-08-12T17:02:40+00:00'
 created_at: '2026-08-06T09:03:24+00:00'
-updated_at: '2026-08-06T09:03:24+00:00'
+updated_at: '2026-08-12T17:02:40+00:00'

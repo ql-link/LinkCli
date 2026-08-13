@@ -1,6 +1,6 @@
 import type { DiscoveryResult, DiscoveredTool, JsonObject } from "../../src/domain.js";
-import { BoundedDispatcher, type EnvelopeSink } from "../../src/collection/dispatcher.js";
-import type { CallEnvelope } from "../../src/collection/envelope.js";
+import { MemoryCollectionRepository } from "../../src/collection/repository.js";
+import { CollectionWorker } from "../../src/collection/worker.js";
 import { MemoryRegistryRepository } from "../../src/db/repository.js";
 import { CredentialService } from "../../src/gateway/auth.js";
 import { CatalogService } from "../../src/gateway/catalog.js";
@@ -40,10 +40,8 @@ export class CapturingEvents implements RegistryEventSink {
   fail = false;
   async publish(event: RegistryEvent): Promise<void> { if (this.fail) throw new Error("event webhook unavailable"); this.events.push(event); }
 }
-export class CapturingEnvelopeSink implements EnvelopeSink { readonly envelopes: CallEnvelope[] = []; fail = false; async send(envelope: CallEnvelope): Promise<void> { if (this.fail) throw new Error("L2 unavailable"); this.envelopes.push(envelope); } }
-
 export function createHarness(options: { failureThreshold?: number; recoveryThreshold?: number; staleAfterMs?: number } = {}) {
-  const repository = new MemoryRegistryRepository(); const connector = new FakeMcpConnector(); const events = new CapturingEvents(); const sink = new CapturingEnvelopeSink();
+  const repository = new MemoryRegistryRepository(); const collection = new MemoryCollectionRepository(); const connector = new FakeMcpConnector(); const events = new CapturingEvents();
   const cipher = new ProjectCredentialCipher(testKey, "test-key");
   const discovery = new DiscoveryService(connector, 1000);
   const health = new HealthMonitor(repository, connector, cipher, options.failureThreshold ?? 1, options.recoveryThreshold ?? 1, 1000, events);
@@ -51,9 +49,10 @@ export function createHarness(options: { failureThreshold?: number; recoveryThre
   const reviews = new ReviewService(repository, health, events);
   const credentials = new CredentialService(repository);
   const catalog = new CatalogService(repository, options.staleAfterMs ?? 60_000);
-  const dispatcher = new BoundedDispatcher(sink, 10);
-  const gateway = new GatewayRouter(repository, catalog, connector, cipher, health, dispatcher, 1000);
-  return { repository, connector, events, sink, cipher, discovery, health, projects, reviews, credentials, catalog, dispatcher, gateway };
+  const collectionSettings = { idleTimeoutMs: 300_000, gracePeriodMs: 60_000, lateRevisionMs: 86_400_000, maxCallsPerTurn: 100, maxDeliveryAttempts: 3 };
+  const collectionWorker = new CollectionWorker(collection, collectionSettings, { batchSize: 100, leaseMs: 30_000, startedCallTimeoutMs: 120_000, retryBaseMs: 1 });
+  const gateway = new GatewayRouter(repository, catalog, connector, cipher, health, collection, Buffer.alloc(32, 9), 1000);
+  return { repository, collection, collectionSettings, collectionWorker, connector, events, cipher, discovery, health, projects, reviews, credentials, catalog, gateway };
 }
 
 export async function registerSubmitted(harness: ReturnType<typeof createHarness>, endpoint = "http://project.test/mcp", key = "knowledge") {
