@@ -37,7 +37,7 @@ async function resetDatabase(pool: Pool): Promise<void> {
     if (!/(?:_dev|_test)$/.test(name)) throw new Error(`Refusing to reset non-test database: ${name}`);
     await connection.query("SET FOREIGN_KEY_CHECKS=0");
     try {
-      for (const table of ["mcp_reviews", "mcp_tool_runtime", "mcp_tool_versions", "mcp_service_versions", "mcp_projects", "mcp_call_credentials"]) {
+      for (const table of ["mcp_l4_validation_feedback","mcp_l4_candidate_outbox","mcp_cluster_score_history","mcp_skill_coverage_gap","mcp_query_cluster_scene","mcp_query_cluster_member","mcp_query_cluster","mcp_analysis_input","mcp_reviews", "mcp_tool_runtime", "mcp_tool_versions", "mcp_service_versions", "mcp_projects", "mcp_call_credentials"]) {
         await connection.query(`TRUNCATE TABLE \`${table}\``);
       }
     } finally {

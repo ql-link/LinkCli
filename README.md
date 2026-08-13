@@ -28,12 +28,20 @@ npm run admin:bootstrap -- --username operator --display-name "平台运营"
 
 第二条命令从终端读取首个运营管理员密码，不要把密码放进命令参数。`npm run dev` 同时启动 API 和 Vite 控制台；生产构建由 Express 同域托管 `web/dist`。
 
+已有数据库启用 L3 定时分析前，先从同一份 `src/db/schema.sql` 真值源补齐分析表：
+
+```bash
+npm run db:upgrade:analysis
+```
+
 ## 接口
 
 - `GET /healthz`：进程健康检查。
 - `/api/*`：控制台登录会话和页面接口，浏览器使用 HttpOnly Cookie，不接触部署级管理密钥。
 - `/admin/*`：登记、版本、审核、项目状态和平台凭据管理。请求必须携带 `x-admin-api-key`、`x-platform-user-id` 和 `x-platform-role`。
 - `/mcp`：标准 MCP Streamable HTTP 入口，使用 `Authorization: Bearer <platform-token>`。
+
+L3 Query 分析不在 `/mcp` 实时链路中执行。L2 将一轮已结算 Query 写入 `mcp_analysis_input` 后，L3 定时批量提取有序 MCP 模块路径、聚类 Query、归纳组内操作场景并统计门槛；达标结果写入 `mcp_l4_candidate_outbox`，由 L4 后续生成或扩展 Skill。
 
 管理接口和状态规则详见 [架构说明](docs/architecture.md)。
 
@@ -47,7 +55,7 @@ npm run build
 npm run check
 ```
 
-自动化测试使用内存仓库和确定性 MCP 替身，并包含真实 Streamable HTTP 协议边界测试。它们不证明目标 MySQL 实例、真实项目 MCP 或 L2 采集服务已经就绪。
+自动化测试使用内存仓库和确定性 MCP 替身，并包含真实 Streamable HTTP 协议边界测试。L3 测试验证“查用户后查、改、删订单”属于同一 Query 类别但形成不同场景，以及未命中 MCP 和 Skill 覆盖缺口分支。普通测试不证明目标 MySQL 实例、真实项目 MCP 或 L2 采集服务已经就绪。
 
 连接专用开发数据库执行真实 MySQL + 标准 MCP 端到端联调：
 
@@ -56,4 +64,4 @@ set -a && source .env.development.local && set +a
 npm run test:mysql
 ```
 
-该测试只接受库名以 `_dev` 或 `_test` 结尾的显式 `LINKCLI_TEST_MYSQL_URL`，执行前后会清空测试范围内的 LinkCli 表，不得指向共享业务库或生产库。
+该测试只接受库名以 `_dev` 或 `_test` 结尾的显式 `LINKCLI_TEST_MYSQL_URL`，执行前后会清空测试范围内的 LinkCli 表，不得指向共享业务库或生产库。测试同时覆盖网关持久化和 L3 批处理、聚类、场景统计及候选 Outbox。
