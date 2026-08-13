@@ -40,7 +40,7 @@ export class SdkMcpConnector implements McpConnector {
       if (/401|403|unauthor/i.test(message)) throw new AppError("DOWNSTREAM_AUTH_FAILED", "Downstream MCP authentication failed", 502);
       if (/fetch failed|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|network|socket|connect/i.test(message)) throw new AppError("DOWNSTREAM_CONNECTION_FAILED", "Downstream MCP connection failed", 502);
       if (error instanceof AppError) throw error;
-      throw new AppError("DOWNSTREAM_PROTOCOL_ERROR", `Downstream MCP error: ${message}`, 502);
+      throw new AppError("DOWNSTREAM_PROTOCOL_ERROR", "Downstream MCP protocol error", 502);
     } finally {
       clearTimeout(timer);
       await client.close().catch(() => undefined);
