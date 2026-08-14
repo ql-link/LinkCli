@@ -2,7 +2,9 @@
 
 ## 1. 实现结果
 
-LinkCli 现在具备一条独立于用户实时请求的 L3 批处理链路。L2 可以通过整轮输入契约写入已经结算的 Query；L3 默认每 5 分钟读取一批未分析记录，根据实际 MCP Project 和有序 Module 路径限定候选范围，再以本地确定性相似度完成宽口径聚类。查询、修改、删除不会拆散“用户模块 → 订单模块”这一 Query 类别，而会形成三个可独立统计的组内场景。
+LinkCli 已实现独立于用户实时请求的 L2→L3 数据链路：L2 结算后写入 Analysis Outbox，后台 Worker 关联轮次和调用明细，自动、幂等地转换成 L3 输入；L3 再由定时任务批量处理未分析记录。Outbox、批处理、事务隔离和候选写入等结构能力已经落地。
+
+但按飞书 revision 9 的验收口径，L3 **尚未实现完成**。当前注册模型没有独立稳定的 Module 实体，字符二元组 Jaccard 也不具备业务语义聚类能力。真实 MCP 的 50 条 Query 批测最终得到 50 个单成员类别，因此不能将现有聚类结果或候选质量视为通过。
 
 正常类别、未命中 MCP 的需求和已有 Skill 覆盖缺口使用不同门槛分流。达到门槛时，类别状态和脱敏候选证据在同一事务写入 `mcp_l4_candidate_outbox`。L3 不生成或执行 Skill，不调用业务 MCP，也不进行数据库反向校验。
 
@@ -15,6 +17,7 @@ LinkCli 现在具备一条独立于用户实时请求的 L3 批处理链路。L2
 主要实现位置：
 
 - `src/analysis/input-consumer.ts`：L2 完整轮次输入校验、规范化和幂等写入。
+- `src/analysis/outbox-worker.ts`：租约领取 L2 Analysis Outbox，关联完整轮次事实并可靠转换为 L3 输入。
 - `src/analysis/similarity.ts`：Query 归一化、模块路径、场景和确定性相似度。
 - `src/analysis/batch-service.ts`：定时批量聚类、质量统计、门槛和候选生成。
 - `src/analysis/repository.ts`：内存测试仓库及 MySQL 事务、锁、聚类和 Outbox 持久化。
@@ -24,20 +27,24 @@ LinkCli 现在具备一条独立于用户实时请求的 L3 批处理链路。L2
 
 ## 2. 实际运行方式
 
-1. L2 将一轮最终结算 Query 交给 `AnalysisInputConsumer`；零调用需求也必须显式提交。
+1. L2 将最终结算轮次写入 `mcp_analysis_outbox`，Worker 自动关联 `mcp_turns + mcp_call_events` 后交给 `AnalysisInputConsumer`；零调用需求仍必须由宿主显式提交。
 2. 消费器只保存脱敏调用事实和参数键，不保存凭据或完整业务结果。
 3. `AnalysisBatchScheduler` 按 `L3_BATCH_INTERVAL_MS` 触发批次，并在 MySQL 上取得全局批处理锁。
-4. 批处理按 `project_scope + ordered_module_path` 检索候选类别，再比较 Query 内容；具体 Tool 动作写成组内场景。
+4. 当前代码临时以 MCP Project 快照生成候选路径；这只能用于验证批处理链路，不等价于飞书方案要求的 `project_scope + ordered_module_path`，正式聚类前必须补齐稳定 Module 快照。
 5. 批次重算样本数、独立用户数、时间跨度、成功率、内聚度、输入完整率及覆盖缺口。
 6. 达标类别原子写入 L4 候选 Outbox；未达标类别保持观察，等待后续批次。
 7. 单条处理失败时事务回滚，不写 `analyzed_at`，批次继续处理其他输入，失败记录下一批重新处理。
 8. 类别首次交付 `new_skill` 后如果出现达到门槛的覆盖缺口，可以继续交付一次 `expand_skill`；同一类别和候选类型不会重复发送。
 
-## 3. 与确认方案的差异
+## 3. 与飞书方案的实现缺口
 
 ### 首版语义算法
 
-方案为语义模型保留了可替换边界，首版实际使用去除操作词和易变标识后的字符二元特征 Jaccard 相似度。这样可以在不引入外部 LLM、网络调用和敏感数据外发的条件下验证“同模块路径、宽口径场景”的业务假设。真实影子数据如果证明准确率不足，可以替换该实现而不改变输入、仓库和批处理契约。
+飞书方案要求先用文本指纹去重，再使用本地语义模型与类别语义中心比较，并周期性执行合并和拆分检查。当前实现只使用字符二元组 Jaccard，还会删除部分操作词。真实批测中，同主题 Query 的中位相似度约为 0.19，最高约为 0.464，全部低于当前 0.82 加入阈值。降低固定阈值又会增加跨主题误合并，因此该算法不符合已确认方案，不是仅调整阈值即可收口的问题。
+
+### Module 边界
+
+飞书方案明确复用 MCP 的 `Project → Module → Tool` 分层，有序 Module 路径是候选范围的硬边界，Tool 操作只是组内场景。当前代码只有 Project 和 Tool 注册信息，将 Project 作为隐式 Module 会丢失“用户 → 订单”这类真实业务路径，因此只是现有代码状态，不能作为正式实现方案。
 
 ### Skill 覆盖元数据
 
@@ -56,8 +63,10 @@ LinkCli 现在具备一条独立于用户实时请求的 L3 批处理链路。L2
 实际执行：
 
 - `npm run typecheck`：通过。
-- `npm test -- --run tests/analysis-batch.test.ts tests/mysql-analysis.integration.test.ts`：15 个 L3 单元测试通过，3 个真实 MySQL 用例因未配置 `LINKCLI_TEST_MYSQL_URL` 跳过。
-- `npm run check`：在沙箱外通过；66 个测试通过，6 个需要真实 MySQL 的测试因未配置 `LINKCLI_TEST_MYSQL_URL` 跳过，API 与 Web 构建通过。
+- `npm run check`：通过；84 个常规测试通过，API 与 Web 构建通过，6 个需要显式测试库的用例按设计跳过。
+- `npm run test:mysql`：连接隔离 MySQL 8.0.42 串行执行，6 个真实 MySQL/MCP 用例全部通过。
+
+上述自动化证明了数据链路、幂等、事务隔离和固定样例行为，不证明真实语义聚类已通过。后续真实 MCP 批测使用 50 条自然语言 Query，工具统计、轮次结算和 L2 Outbox 投递均为 50/50，但 L3 产生 50 个单例类别，语义聚类验收失败。
 
 已经覆盖：
 
@@ -70,23 +79,26 @@ LinkCli 现在具备一条独立于用户实时请求的 L3 批处理链路。L2
 - 单条输入事务失败不会阻塞同批其他输入；失败记录保留待重试并由调度器报告。
 - `new_skill` 已交付后出现覆盖缺口时可继续产生一次 `expand_skill`，同类型事件保持幂等。
 - 重复事件、非可信输入、批处理重入和结算版本前置替换。
+- L2 Analysis Outbox 自动转换为 L3 Input，重复领取不重复写入；不支持事件按上限退避后进入死信。
 - 成功响应中出现重试、切路、放弃或无产出信号时，不计为质量成功样本。
 - 配置校验、现有网关、控制台、标准 MCP 协议及生产构建回归。
 
 人工验收不适用：本次没有新增 UI 或人工交互入口。
 
-未覆盖：真实 MySQL DDL、advisory lock、事务与 Outbox 集成测试已编写，但当前环境没有提供 `LINKCLI_TEST_MYSQL_URL`，本次未实际执行。
+未覆盖：真实企业 MCP 服务、宿主零调用事件和生产 Skill 元数据仍没有可用测试环境；本次真实联调使用标准 MCP HTTP 测试服务和虚构数据。
 
 ## 5. 当前限制与 PR 重点
 
 当前仍存在以下限制：
 
-- 当前调用级 L2 尚未把完整轮次写入 `mcp_analysis_input`，因此调度器上线后可以正常空跑，但在 L2 接线前不会产生真实候选。
+- 真实 MySQL 测试文件共享同一个专用数据库，必须串行执行；`npm run test:mysql` 已固定使用 `--no-file-parallelism`，避免并行清表制造伪失败。
+- MCP 注册模型尚未提供稳定 `module_id` 和版本快照，当前 Project 级路径不满足飞书业务边界。
+- 字符二元组相似度已被真实 50 Query 批测证明不满足语义聚类需求，正式候选产生前必须替换并重新标定。
 - 生产 `SkillCoverageResolver` 尚未接入 L4 Skill 元数据，真实覆盖缺口只能在该契约补齐后识别。
-- Outbox 消费、L4 验证反馈处理、自动重聚类和已分析轮次补偿重建属于后续 L4/运维接线范围。
+- L4 Candidate Outbox 消费、L4 验证反馈处理、自动重聚类和已分析轮次补偿重建属于后续 L4/运维接线范围。
 
 PR 审查时重点确认：
 
-- L2 完整轮次输入是否能提供稳定 Module ID 和零调用记录，而不是继续使用单次 `CallEnvelope`。
+- 宿主何时提供零调用和未命中 MCP 的显式轮次结束事件；仅靠 `tools/call` 仍无法采集这类需求。
 - 首版相似度阈值是否先通过影子数据评估再用于生产候选。
 - 目标 MySQL 环境运行 `npm run db:upgrade:analysis` 后，必须执行 `npm run test:mysql`。

@@ -21,9 +21,9 @@
 |---|---|---|
 | L1 | 当前 `master` 与 `origin/dev` | 已实现服务登记、审核、网关和真实 MySQL/MCP 测试 |
 | L2 | `origin/dev`，提交 `4247d4d`，已合入 `origin/dev` | 已实现可靠采集、轮次归组和分析 Outbox |
-| L3 | 当前工作树未提交修改 | 已实现批量聚类，当前 Spec 为 `quality_review` |
+| L3 | 当前工作树未提交修改 | 数据链路和批处理已实现；Module 快照和语义聚类尚未通过验收 |
 
-当前工作树基于 `master`，尚未包含 `origin/dev` 的完整 L2。因此正式联调前必须先把 L3 变更与 `origin/dev` 整合到同一代码快照，不能直接在当前工作树上宣称 L1-L2-L3 已联通。
+当前集成分支已经包含 L1、L2 和 L3。正式联调仍必须记录同一代码快照，并先通过下述 Gate 0，不能仅根据三层代码共存宣称链路已联通。
 
 ### 2.2 Gate 0：L2→L3 契约必须先打通
 
@@ -52,13 +52,14 @@ behaviorSignals、settlementStatus、collectionTrust、attemptedSkillId/version�
 | 结算状态 | L2 轮次结算 | 不允许把 Tool 成功直接等同于用户问题成功 |
 | Outbox 消费 | 幂等消费 `turn_id + settlement_revision` | 不允许用人工 SQL 插入 `mcp_analysis_input` 冒充端到端联调 |
 
-Gate 0 通过标准：一次真实 MCP 调用形成 L2 已结算轮次后，L2 消费器能够自动、幂等地生成一条 L3 `mcp_analysis_input`，且字段来源可以逐项追溯。
+Gate 0 通过标准：一次真实 MCP 调用形成 L2 已结算轮次后，Analysis Outbox Worker 能够自动、幂等地生成一条 L3 `mcp_analysis_input`，且字段来源可以逐项追溯。候选路径还必须使用调用时稳定的 `project_id + ordered module_id` 快照；当前 `project_id + project_key` 只能验证数据链路，不能作为 Module 业务边界的验收证据。
 
 ### 2.3 其他前置依赖
 
 - 零调用 Query 需要宿主提供明确的“轮次结束但未调用 MCP”事件；仅靠 `tools/call` 无法发现零调用需求。
 - `expand_skill` 真实联调需要可读取的 Skill 能力元数据和生产 `SkillCoverageResolver`；未接入前只能做受控模块测试，不能宣称生产覆盖缺口链路已验证。
 - L3 使用的 Module ID 必须来自稳定注册快照。若当前 MCP 注册模型尚未保存 Module，必须先补该字段和版本快照。
+- L3 的字符二元组相似度已在 50 条真实 Query 中失败，替换为本地语义模型并完成标注数据验证前，不得宣称 Query 聚类完成。
 
 ## 3. 测试环境
 

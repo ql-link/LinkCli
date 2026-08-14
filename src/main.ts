@@ -1,6 +1,8 @@
 import { createPool } from "mysql2/promise";
 import { AnalysisBatchScheduler } from "./analysis/batch-scheduler.js";
 import { AnalysisBatchService } from "./analysis/batch-service.js";
+import { AnalysisInputConsumer } from "./analysis/input-consumer.js";
+import { AnalysisOutboxWorker } from "./analysis/outbox-worker.js";
 import { MySqlAnalysisRepository } from "./analysis/repository.js";
 import { MySqlIdentityRepository } from "./auth/repository.js";
 import { IdentityService } from "./auth/service.js";
@@ -27,6 +29,7 @@ async function main(): Promise<void> {
   await pool.query("SELECT 1");
   const repository = new MySqlRegistryRepository(pool, pool);
   const analysisRepository = new MySqlAnalysisRepository(pool, pool);
+  const analysisInputConsumer = new AnalysisInputConsumer(analysisRepository);
   const fingerprintKey = Buffer.from(config.COLLECTION_FINGERPRINT_KEY, "base64");
   const collection = new MySqlCollectionRepository(pool, fingerprintKey);
   const identity = new IdentityService(new MySqlIdentityRepository(pool));
@@ -56,6 +59,7 @@ async function main(): Promise<void> {
     joinSimilarity: config.L3_JOIN_SIMILARITY,
   });
   const analysisScheduler = new AnalysisBatchScheduler(analysis, config.L3_BATCH_INTERVAL_MS, config.L3_BATCH_SIZE, (error) => console.error("L3 analysis batch failed", error));
+  const analysisOutboxWorker = new AnalysisOutboxWorker(pool, analysisInputConsumer, { batchSize:config.COLLECTION_WORKER_BATCH_SIZE,leaseMs:config.COLLECTION_LEASE_MS,maxAttempts:config.COLLECTION_MAX_DELIVERY_ATTEMPTS,retryBaseMs:config.COLLECTION_WORKER_INTERVAL_MS });
   const app = createApp(
     { projects, reviews, health, credentials, catalog, gateway, collection }, config.ADMIN_API_KEY, config.HOST, config.MCP_ALLOWED_HOSTS,
     { identity, repository, projects, reviews, health, credentials, statistics }, config.WEB_DIST_DIR, config.NODE_ENV === "production",
@@ -67,7 +71,7 @@ async function main(): Promise<void> {
   let collectionTask: Promise<void> | null = null;
   const collectionTimer = setInterval(() => {
     if (collectionTask) return;
-    collectionTask = collectionWorker.drainOnce().then(() => collectionWorker.maintainOnce()).then(() => undefined).catch(() => { console.error("Collection worker cycle failed"); }).finally(() => { collectionTask = null; });
+    collectionTask = collectionWorker.drainOnce().then(() => collectionWorker.maintainOnce()).then(() => analysisOutboxWorker.drainOnce()).then(() => undefined).catch(() => { console.error("Collection worker cycle failed"); }).finally(() => { collectionTask = null; });
   }, config.COLLECTION_WORKER_INTERVAL_MS);
   collectionTimer.unref();
   const retentionTimer = setInterval(() => { void retention.runOnce().catch(() => { console.error("Collection retention cycle failed"); }); }, 24 * 60 * 60 * 1_000);

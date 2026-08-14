@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -10,6 +11,9 @@ import express, { type Request, type Response } from "express";
 import mysql, { type Pool } from "mysql2/promise";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
+import { AnalysisInputConsumer } from "../src/analysis/input-consumer.js";
+import { AnalysisOutboxWorker } from "../src/analysis/outbox-worker.js";
+import { MySqlAnalysisRepository } from "../src/analysis/repository.js";
 import { MySqlCollectionRepository } from "../src/collection/repository.js";
 import { CollectionWorker } from "../src/collection/worker.js";
 import { MySqlRegistryRepository } from "../src/db/repository.js";
@@ -159,6 +163,32 @@ realMySqlDescribe("real MySQL and standard MCP end-to-end", () => {
       expect(result.content).toEqual([{ type: "text", text: "echo:hello" }]);
       expect(downstream.calls).toEqual([{ message: "hello" }]);
       expect((await restartedServices.collectionWorker.drainOnce()).delivered).toBe(1);
+      const collectionSettings = { idleTimeoutMs:1,gracePeriodMs:1,lateRevisionMs:86_400_000,maxCallsPerTurn:100,maxDeliveryAttempts:3 };
+      const settlementAt = new Date(Date.now()+10_000);
+      await restartedServices.collection.advanceTurnLifecycles(collectionSettings,settlementAt);
+      await restartedServices.collection.advanceTurnLifecycles(collectionSettings,new Date(settlementAt.getTime()+2));
+      expect(await restartedServices.collection.settleReadyTurns(new Date(settlementAt.getTime()+3),100)).toBe(1);
+      const analysisInput = new AnalysisInputConsumer(new MySqlAnalysisRepository(pool,pool));
+      const analysisOutbox = new AnalysisOutboxWorker(pool,analysisInput,{batchSize:100,leaseMs:30_000,maxAttempts:3,retryBaseMs:10},()=>new Date(settlementAt.getTime()+4));
+      expect(await analysisOutbox.drainOnce()).toMatchObject({claimed:1,delivered:1,failed:0});
+      expect(await analysisOutbox.drainOnce()).toMatchObject({claimed:0,delivered:0});
+      const [[analysisState]] = await pool.query<mysql.RowDataPacket[]>("SELECT event_id,turn_id,settlement_version,actor_hash,query_text,module_path,calls,collection_trust FROM mcp_analysis_input");
+      if (!analysisState) throw new Error("L2 analysis outbox was not converted to an L3 input");
+      expect(analysisState).toMatchObject({settlement_version:1,actor_hash:createHash("sha256").update("agent-e2e").digest("hex"),query_text:"请回显 hello",collection_trust:"trusted"});
+      expect(typeof analysisState.event_id).toBe("string");
+      expect(typeof analysisState.turn_id).toBe("string");
+      expect(typeof analysisState.calls === "string" ? JSON.parse(analysisState.calls) : analysisState.calls).toEqual([{sequence:1,projectId:expect.any(String),moduleId:"devfixture",toolName:"echo",operation:"execute",parameterKeys:["message"],outcome:"success"}]);
+      expect(typeof analysisState.module_path === "string" ? JSON.parse(analysisState.module_path) : analysisState.module_path).toEqual(["devfixture"]);
+      const [[analysisDelivery]] = await pool.query<mysql.RowDataPacket[]>("SELECT delivery_status,delivery_attempts,last_error_code FROM mcp_analysis_outbox");
+      expect(analysisDelivery).toMatchObject({delivery_status:"delivered",delivery_attempts:1,last_error_code:null});
+      let retryAt = new Date(settlementAt.getTime()+10);
+      await pool.execute("INSERT INTO mcp_analysis_outbox (event_id,turn_id,settlement_revision,event_type,payload,delivery_status,next_attempt_at) SELECT '00000000-0000-4000-8000-000000000001',turn_id,settlement_revision,'retract',JSON_OBJECT(),'pending',? FROM mcp_analysis_outbox WHERE event_type='upsert' LIMIT 1",[retryAt]);
+      const failingAnalysisOutbox = new AnalysisOutboxWorker(pool,analysisInput,{batchSize:100,leaseMs:30_000,maxAttempts:2,retryBaseMs:10},()=>retryAt);
+      expect(await failingAnalysisOutbox.drainOnce()).toMatchObject({claimed:1,failed:1,deadLettered:0});
+      retryAt = new Date(retryAt.getTime()+10);
+      expect(await failingAnalysisOutbox.drainOnce()).toMatchObject({claimed:1,failed:1,deadLettered:1});
+      const [[deadAnalysisDelivery]] = await pool.query<mysql.RowDataPacket[]>("SELECT delivery_status,delivery_attempts,last_error_code FROM mcp_analysis_outbox WHERE event_type='retract'");
+      expect(deadAnalysisDelivery).toMatchObject({delivery_status:"dead_letter",delivery_attempts:2,last_error_code:"UNSUPPORTED_ANALYSIS_EVENT"});
 
       const [[state]] = await pool.query<mysql.RowDataPacket[]>(`SELECT p.status, p.health_status, v.review_status, v.submitted_at, r.decision
         FROM mcp_projects p

@@ -145,7 +145,7 @@ export class MySqlAnalysisRepository implements AnalysisRepository {
   async withBatchLock<T>(work: (repository: AnalysisRepository) => Promise<T>): Promise<T | null> {
     if (!this.pool) return work(this);
     const connection=await this.pool.getConnection();
-    try { const [[lock]]=await connection.query<RowDataPacket[]>("SELECT GET_LOCK('linkcli:l3-analysis-batch',0) acquired"); if (!lock || Number(lock.acquired)!==1) return null; return await work(new MySqlAnalysisRepository(connection,undefined,true)); }
+    try { const [[lock]]=await connection.query<RowDataPacket[]>("SELECT GET_LOCK('linkcli:l3-analysis-batch',0) acquired"); if (!lock || Number(lock.acquired)!==1) return null; return await work(new MySqlAnalysisRepository(this.pool,this.pool)); }
     finally { await connection.query("SELECT RELEASE_LOCK('linkcli:l3-analysis-batch')").catch(()=>undefined); connection.release(); }
   }
   async insertInput(input: AnalysisInput): Promise<boolean> {
