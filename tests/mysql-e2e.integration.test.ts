@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -10,7 +11,11 @@ import express, { type Request, type Response } from "express";
 import mysql, { type Pool } from "mysql2/promise";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
-import { BoundedDispatcher, NoopEnvelopeSink } from "../src/collection/dispatcher.js";
+import { AnalysisInputConsumer } from "../src/analysis/input-consumer.js";
+import { AnalysisOutboxWorker } from "../src/analysis/outbox-worker.js";
+import { MySqlAnalysisRepository } from "../src/analysis/repository.js";
+import { MySqlCollectionRepository } from "../src/collection/repository.js";
+import { CollectionWorker } from "../src/collection/worker.js";
 import { MySqlRegistryRepository } from "../src/db/repository.js";
 import { CredentialService } from "../src/gateway/auth.js";
 import { CatalogService, USER_QUESTION_FIELD } from "../src/gateway/catalog.js";
@@ -37,7 +42,7 @@ async function resetDatabase(pool: Pool): Promise<void> {
     if (!/(?:_dev|_test)$/.test(name)) throw new Error(`Refusing to reset non-test database: ${name}`);
     await connection.query("SET FOREIGN_KEY_CHECKS=0");
     try {
-      for (const table of ["mcp_reviews", "mcp_tool_runtime", "mcp_tool_versions", "mcp_service_versions", "mcp_projects", "mcp_call_credentials"]) {
+      for (const table of ["mcp_l4_validation_feedback", "mcp_l4_candidate_outbox", "mcp_cluster_score_history", "mcp_skill_coverage_gap", "mcp_query_cluster_scene", "mcp_query_cluster_member", "mcp_query_cluster", "mcp_analysis_input", "mcp_analysis_outbox", "mcp_call_events", "mcp_turns", "mcp_call_outbox", "mcp_reviews", "mcp_tool_runtime", "mcp_tool_versions", "mcp_service_versions", "mcp_projects", "mcp_call_credentials"]) {
         await connection.query(`TRUNCATE TABLE \`${table}\``);
       }
     } finally {
@@ -50,6 +55,7 @@ async function resetDatabase(pool: Pool): Promise<void> {
 
 function createServices(pool: Pool) {
   const repository = new MySqlRegistryRepository(pool, pool);
+  const collection = new MySqlCollectionRepository(pool, Buffer.alloc(32, 23));
   const connector = new SdkMcpConnector();
   const cipher = new ProjectCredentialCipher(Buffer.alloc(32, 19).toString("base64"), "mysql-e2e-v1");
   const events = new NoopRegistryEventSink();
@@ -59,9 +65,9 @@ function createServices(pool: Pool) {
   const reviews = new ReviewService(repository, health, events);
   const credentials = new CredentialService(repository);
   const catalog = new CatalogService(repository, 60_000);
-  const dispatcher = new BoundedDispatcher(new NoopEnvelopeSink(), 100);
-  const gateway = new GatewayRouter(repository, catalog, connector, cipher, health, dispatcher, 5_000);
-  return { repository, projects, reviews, health, credentials, catalog, dispatcher, gateway };
+  const gateway = new GatewayRouter(repository, catalog, connector, cipher, health, collection, Buffer.alloc(32, 23), 5_000);
+  const collectionWorker = new CollectionWorker(collection, { idleTimeoutMs: 300_000, gracePeriodMs: 60_000, lateRevisionMs: 86_400_000, maxCallsPerTurn: 100, maxDeliveryAttempts: 3 }, { batchSize: 100, leaseMs: 30_000, startedCallTimeoutMs: 120_000, retryBaseMs: 10 });
+  return { repository, collection, collectionWorker, projects, reviews, health, credentials, catalog, gateway };
 }
 
 async function listen(app: ReturnType<typeof createMcpExpressApp>): Promise<{ baseUrl: string; close: () => Promise<void> }> {
@@ -92,6 +98,7 @@ async function startDownstream(): Promise<{ endpoint: string; calls: Array<Recor
     }] }));
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
       calls.push(request.params.arguments ?? {});
+      if (request.params.arguments?.message === "business-error") return { content: [{ type: "text", text: "rejected" }], isError: true };
       return { content: [{ type: "text", text: `echo:${String(request.params.arguments?.message ?? "")}` }] };
     });
     try {
@@ -147,13 +154,41 @@ realMySqlDescribe("real MySQL and standard MCP end-to-end", () => {
       const token = (await issued.json() as { token: string }).token;
 
       await linkcli.close();
-      linkcli = await listen(createApp(createServices(pool), adminKey));
+      const restartedServices = createServices(pool);
+      linkcli = await listen(createApp(restartedServices, adminKey));
       client = new Client({ name: "mysql-e2e-client", version: "1.0.0" });
       await client.connect(new StreamableHTTPClientTransport(new URL(`${linkcli.baseUrl}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${token}`, "x-linkcli-session-id": "mysql-e2e" } } }));
       expect((await client.listTools()).tools.map((tool) => tool.name)).toEqual(["devfixture__echo"]);
       const result = await client.callTool({ name: "devfixture__echo", arguments: { message: "hello", [USER_QUESTION_FIELD]: "请回显 hello" } });
       expect(result.content).toEqual([{ type: "text", text: "echo:hello" }]);
       expect(downstream.calls).toEqual([{ message: "hello" }]);
+      expect((await restartedServices.collectionWorker.drainOnce()).delivered).toBe(1);
+      const collectionSettings = { idleTimeoutMs:1,gracePeriodMs:1,lateRevisionMs:86_400_000,maxCallsPerTurn:100,maxDeliveryAttempts:3 };
+      const settlementAt = new Date(Date.now()+10_000);
+      await restartedServices.collection.advanceTurnLifecycles(collectionSettings,settlementAt);
+      await restartedServices.collection.advanceTurnLifecycles(collectionSettings,new Date(settlementAt.getTime()+2));
+      expect(await restartedServices.collection.settleReadyTurns(new Date(settlementAt.getTime()+3),100)).toBe(1);
+      const analysisInput = new AnalysisInputConsumer(new MySqlAnalysisRepository(pool,pool));
+      const analysisOutbox = new AnalysisOutboxWorker(pool,analysisInput,{batchSize:100,leaseMs:30_000,maxAttempts:3,retryBaseMs:10},()=>new Date(settlementAt.getTime()+4));
+      expect(await analysisOutbox.drainOnce()).toMatchObject({claimed:1,delivered:1,failed:0});
+      expect(await analysisOutbox.drainOnce()).toMatchObject({claimed:0,delivered:0});
+      const [[analysisState]] = await pool.query<mysql.RowDataPacket[]>("SELECT event_id,turn_id,settlement_version,actor_hash,query_text,module_path,calls,collection_trust FROM mcp_analysis_input");
+      if (!analysisState) throw new Error("L2 analysis outbox was not converted to an L3 input");
+      expect(analysisState).toMatchObject({settlement_version:1,actor_hash:createHash("sha256").update("agent-e2e").digest("hex"),query_text:"请回显 hello",collection_trust:"trusted"});
+      expect(typeof analysisState.event_id).toBe("string");
+      expect(typeof analysisState.turn_id).toBe("string");
+      expect(typeof analysisState.calls === "string" ? JSON.parse(analysisState.calls) : analysisState.calls).toEqual([{sequence:1,projectId:expect.any(String),moduleId:"devfixture",toolName:"echo",operation:"execute",parameterKeys:["message"],outcome:"success"}]);
+      expect(typeof analysisState.module_path === "string" ? JSON.parse(analysisState.module_path) : analysisState.module_path).toEqual(["devfixture"]);
+      const [[analysisDelivery]] = await pool.query<mysql.RowDataPacket[]>("SELECT delivery_status,delivery_attempts,last_error_code FROM mcp_analysis_outbox");
+      expect(analysisDelivery).toMatchObject({delivery_status:"delivered",delivery_attempts:1,last_error_code:null});
+      let retryAt = new Date(settlementAt.getTime()+10);
+      await pool.execute("INSERT INTO mcp_analysis_outbox (event_id,turn_id,settlement_revision,event_type,payload,delivery_status,next_attempt_at) SELECT '00000000-0000-4000-8000-000000000001',turn_id,settlement_revision,'retract',JSON_OBJECT(),'pending',? FROM mcp_analysis_outbox WHERE event_type='upsert' LIMIT 1",[retryAt]);
+      const failingAnalysisOutbox = new AnalysisOutboxWorker(pool,analysisInput,{batchSize:100,leaseMs:30_000,maxAttempts:2,retryBaseMs:10},()=>retryAt);
+      expect(await failingAnalysisOutbox.drainOnce()).toMatchObject({claimed:1,failed:1,deadLettered:0});
+      retryAt = new Date(retryAt.getTime()+10);
+      expect(await failingAnalysisOutbox.drainOnce()).toMatchObject({claimed:1,failed:1,deadLettered:1});
+      const [[deadAnalysisDelivery]] = await pool.query<mysql.RowDataPacket[]>("SELECT delivery_status,delivery_attempts,last_error_code FROM mcp_analysis_outbox WHERE event_type='retract'");
+      expect(deadAnalysisDelivery).toMatchObject({delivery_status:"dead_letter",delivery_attempts:2,last_error_code:"UNSUPPORTED_ANALYSIS_EVENT"});
 
       const [[state]] = await pool.query<mysql.RowDataPacket[]>(`SELECT p.status, p.health_status, v.review_status, v.submitted_at, r.decision
         FROM mcp_projects p
@@ -166,6 +201,24 @@ realMySqlDescribe("real MySQL and standard MCP end-to-end", () => {
       const [[credentialCount]] = await pool.query<mysql.RowDataPacket[]>("SELECT COUNT(*) AS count FROM mcp_call_credentials WHERE owner_id = 'agent-e2e' AND token_digest IS NOT NULL");
       if (!credentialCount) throw new Error("Persisted credential count was not returned");
       expect(Number(credentialCount.count)).toBe(1);
+      const [[collectionCount]] = await pool.query<mysql.RowDataPacket[]>("SELECT (SELECT COUNT(*) FROM mcp_call_events) AS calls, (SELECT COUNT(*) FROM mcp_turns) AS turns");
+      expect(collectionCount).toMatchObject({ calls: 1, turns: 1 });
+
+      await Promise.all([
+        client.callTool({ name: "devfixture__echo", arguments: { message: "parallel-a", [USER_QUESTION_FIELD]: "同一轮并发问题" } }),
+        client.callTool({ name: "devfixture__echo", arguments: { message: "parallel-b", [USER_QUESTION_FIELD]: "同一轮并发问题" } }),
+      ]);
+      const concurrentRecords = (await restartedServices.collection.listOutbox()).filter((record) => record.deliveryStatus === "ready");
+      await Promise.all(concurrentRecords.map((record) => restartedServices.collection.ingestCall(record, { idleTimeoutMs: 300_000, gracePeriodMs: 60_000, lateRevisionMs: 86_400_000, maxCallsPerTurn: 100, maxDeliveryAttempts: 3 }, new Date())));
+      const [[concurrentState]] = await pool.query<mysql.RowDataPacket[]>("SELECT COUNT(*) turns, MAX(call_count) max_calls FROM mcp_turns WHERE user_question = '同一轮并发问题'");
+      expect(concurrentState).toMatchObject({ turns: 1, max_calls: 2 });
+
+      await client.callTool({ name: "devfixture__echo", arguments: { message: "business-error", [USER_QUESTION_FIELD]: "错误分类问题" } });
+      const errorRecord = (await restartedServices.collection.listOutbox()).find((record) => record.errorCode === "DOWNSTREAM_TOOL_ERROR");
+      expect(errorRecord).toBeDefined();
+      await restartedServices.collection.ingestCall(errorRecord!, { idleTimeoutMs: 300_000, gracePeriodMs: 60_000, lateRevisionMs: 86_400_000, maxCallsPerTurn: 100, maxDeliveryAttempts: 3 }, new Date());
+      const [errorEvents] = await pool.query<mysql.RowDataPacket[]>("SELECT call_error_code FROM mcp_call_events WHERE event_id = ?", [errorRecord!.id]);
+      expect(errorEvents[0]).toMatchObject({ call_error_code: "DOWNSTREAM_TOOL_ERROR" });
     } finally {
       await client?.close().catch(() => undefined);
       await linkcli?.close().catch(() => undefined);

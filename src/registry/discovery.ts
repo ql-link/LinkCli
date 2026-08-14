@@ -3,6 +3,17 @@ import type { DiscoveryResult, DiscoveredTool } from "../domain.js";
 import { AppError } from "../errors.js";
 import type { McpConnector } from "./connector.js";
 
+const RESERVED_USER_QUESTION_FIELD = "__linkcli_user_question";
+
+function usesReservedProperty(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(usesReservedProperty);
+  if (!value || typeof value !== "object") return false;
+  const object = value as Record<string, unknown>;
+  const properties = object.properties;
+  if (properties && typeof properties === "object" && !Array.isArray(properties) && RESERVED_USER_QUESTION_FIELD in properties) return true;
+  return Object.values(object).some(usesReservedProperty);
+}
+
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   if (value && typeof value === "object") {
@@ -29,6 +40,9 @@ export class DiscoveryService {
       if (!tool.name.trim() || names.has(tool.name)) throw new AppError("CONFLICT", `Duplicate or empty tool name: ${tool.name}`, 409);
       names.add(tool.name);
       if (tool.inputSchema.type !== "object") throw new AppError("DOWNSTREAM_PROTOCOL_ERROR", `Tool ${tool.name} must expose an object input schema`, 422);
+      if (usesReservedProperty(tool.inputSchema)) {
+        throw new AppError("CONFLICT", `Tool ${tool.name} uses reserved field ${RESERVED_USER_QUESTION_FIELD}`, 409);
+      }
     }
     return result;
   }

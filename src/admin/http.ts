@@ -7,6 +7,7 @@ import type { CredentialService } from "../gateway/auth.js";
 import type { HealthMonitor } from "../registry/health-monitor.js";
 import type { ProjectService } from "../registry/project-service.js";
 import type { ReviewService } from "../registry/review-service.js";
+import type { CollectionRepository } from "../collection/repository.js";
 
 const projectSchema = z.object({ projectKey: z.string(), displayName: z.string(), description: z.string(), endpoint: z.string(), projectToken: z.string().min(1).optional() });
 const versionSchema = z.object({ endpoint: z.string(), projectToken: z.string().min(1).optional() });
@@ -48,7 +49,7 @@ const requireRole = (allowed: PlatformIdentity["role"][]) => (req: Request, _res
   } catch (error) { next(error); }
 };
 
-export interface AdminServices { projects: ProjectService; reviews: ReviewService; health: HealthMonitor; credentials: CredentialService; }
+export interface AdminServices { projects: ProjectService; reviews: ReviewService; health: HealthMonitor; credentials: CredentialService; collection?: CollectionRepository; }
 
 export function createAdminRouter(services: AdminServices, adminApiKey: string): Router {
   const router = Router();
@@ -87,5 +88,10 @@ export function createAdminRouter(services: AdminServices, adminApiKey: string):
   });
   router.get("/credentials", requireRole(["platform_user", "owner", "reviewer", "operator"]), async (req, res) => { res.json(await services.credentials.list(req.platformIdentity!.userId)); });
   router.delete("/credentials/:id", requireRole(["platform_user", "owner", "reviewer", "operator"]), async (req, res) => { res.json(credentialView(await services.credentials.revoke(String(req.params.id), req.platformIdentity!.userId))); });
+  if (services.collection) router.post("/collection/dead-letters/:id/replay", requireRole(["operator"]), async (req, res) => {
+    const id = String(req.params.id); const replayed = await services.collection!.replayDeadLetter(id, new Date());
+    if (!replayed) throw new AppError("NOT_FOUND", "Dead-letter event not found", 404);
+    res.status(202).json({ eventId: id, deliveryStatus: "ready" });
+  });
   return router;
 }

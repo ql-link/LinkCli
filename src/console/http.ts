@@ -11,6 +11,8 @@ import type { ProjectService } from "../registry/project-service.js";
 import type { ReviewService } from "../registry/review-service.js";
 import { credentialView, diffTools, projectView, reviewView, toolView, userView, versionView } from "./views.js";
 import { paginate } from "./pagination.js";
+import type { StatisticsService } from "../statistics/service.js";
+import { createStatisticsRouter } from "../statistics/http.js";
 
 const authSchema=z.object({username:z.string(),password:z.string()});
 const registerSchema=authSchema.extend({displayName:z.string()});
@@ -25,7 +27,7 @@ const page=(req:Request)=>({cursor:typeof req.query.cursor==="string"?req.query.
 const canView=(user:PlatformUser,project:Project)=>user.id===project.ownerId||user.role==="reviewer"||user.role==="operator";
 const assertView=(user:PlatformUser,project:Project)=>{if(!canView(user,project))throw new AppError("AUTHORIZATION_FAILED","Project is not available to this account",403);};
 
-export interface ConsoleServices { identity:IdentityService; repository:RegistryRepository; projects:ProjectService; reviews:ReviewService; health:HealthMonitor; credentials:CredentialService; }
+export interface ConsoleServices { identity:IdentityService; repository:RegistryRepository; projects:ProjectService; reviews:ReviewService; health:HealthMonitor; credentials:CredentialService; statistics?:StatisticsService; }
 
 class AttemptLimiter {
   private readonly entries=new Map<string,{count:number;resetAt:number}>();
@@ -39,6 +41,7 @@ export function createConsoleRouter(services:ConsoleServices, secureCookie:boole
   router.post("/auth/login",async(req,res,next)=>{const b=authSchema.parse(req.body);const key=`login:${req.ip}:${b.username.trim()}`;try{attempts.check(key);const result=await services.identity.login(b.username,b.password);attempts.clear(key);setSessionCookie(res,result.token,result.session.expiresAt,secureCookie);res.json({data:{user:userView(result.user),session:{expiresAt:result.session.expiresAt}}});}catch(e){next(e);}});
   router.post("/auth/logout",async(req,res,next)=>{try{const token=parseCookies(req.header("cookie"))[SESSION_COOKIE];if(token)await services.identity.logout(token);clearSessionCookie(res,secureCookie);res.status(204).end();}catch(e){next(e);}});
   router.use(requireSession(services.identity,secureCookie));
+  if (services.statistics) router.use("/statistics", createStatisticsRouter(services.statistics));
   router.get("/auth/session",(req,res)=>res.json({data:{user:userView(req.consoleUser!),session:{expiresAt:req.consoleSession!.expiresAt}}}));
   router.patch("/me",async(req,res,next)=>{try{const b=z.object({displayName:z.string()}).parse(req.body);res.json({data:{user:userView(await services.identity.updateDisplayName(req.consoleUser!.id,b.displayName))}});}catch(e){next(e);}});
 

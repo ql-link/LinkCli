@@ -13,11 +13,12 @@
     "build:web": "vite build --config web/vite.config.ts",
     "db:init": "node scripts/db/apply-schema.mjs",
     "db:upgrade:console": "node scripts/db/apply-console-schema.mjs",
+    "db:upgrade:analysis": "node scripts/db/apply-analysis-schema.mjs",
     "admin:bootstrap": "node scripts/admin/bootstrap-operator.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "typecheck:web": "tsc -p web/tsconfig.json --noEmit",
     "test": "vitest run",
-    "test:mysql": "vitest run tests/mysql-e2e.integration.test.ts",
+    "test:mysql": "vitest run --no-file-parallelism tests/mysql-e2e.integration.test.ts tests/mysql-analysis.integration.test.ts",
     "check": "npm run typecheck && npm run typecheck:web && npm test && npm run build",
     "spec": "python3 scripts/spec/flow_guard.py"
   },

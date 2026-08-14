@@ -30,42 +30,45 @@ describe("M2 unified gateway", () => {
     expect((tool.inputSchema.properties as Record<string, unknown>)[USER_QUESTION_FIELD]).toBeDefined();
   });
 
-  it("uses the project token, strips platform context, and dispatches a redacted envelope", async () => {
+  it("uses the project token, strips platform context, and durably records a redacted call", async () => {
     const { h, registered } = await readyHarness();
-    const result = await h.gateway.call("knowledge__search", { query: "季度规划", [USER_QUESTION_FIELD]: "公司下一季度如何规划？", apiKey: "should-redact" }, { platformOwnerId: "agent", sessionId: "session-1", callSequence: 1 });
+    const result = await h.gateway.call("knowledge__search", { query: "季度规划", [USER_QUESTION_FIELD]: "公司下一季度如何规划？", apiKey: "should-redact" }, { platformOwnerId: "agent", credentialId: "credential", transportSessionId: "session-1" });
     expect(result.content).toEqual([{ type: "text", text: "ok" }]);
     const call = h.connector.endpoints.get(registered.version.endpoint)!.calls[0]!;
     expect(call.token).toBe("project-token");
     expect(call.arguments).toEqual({ query: "季度规划", apiKey: "should-redact" });
     expect(call.arguments).not.toHaveProperty(USER_QUESTION_FIELD);
-    await h.dispatcher.idle();
-    expect(h.sink.envelopes[0]?.argumentsSummary).toContain("[REDACTED]");
-    expect(h.sink.envelopes[0]?.argumentsSummary).not.toContain("季度规划");
-    expect(h.sink.envelopes[0]?.turnId).toHaveLength(32);
+    const outbox = await h.collection.listOutbox();
+    expect(JSON.stringify(outbox[0]?.argumentsSummary)).toContain("[REDACTED]");
+    expect(JSON.stringify(outbox[0]?.argumentsSummary)).not.toContain("季度规划");
+    expect(outbox[0]).toMatchObject({ status: "completed", deliveryStatus: "ready" });
   });
 
   it("does not call downstream when the original question is missing", async () => {
     const { h, registered } = await readyHarness();
-    await expect(h.gateway.call("knowledge__search", { query: "x" }, { platformOwnerId: "agent", sessionId: "s", callSequence: 1 })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    await expect(h.gateway.call("knowledge__search", { query: "x" }, { platformOwnerId: "agent", credentialId: "credential", transportSessionId: "s" })).rejects.toMatchObject({ code: "COLLECTION_CONTEXT_INVALID" });
     expect(h.connector.endpoints.get(registered.version.endpoint)!.calls).toHaveLength(0);
   });
 
   it("never retries a failed downstream call", async () => {
     const { h, registered } = await readyHarness(); h.connector.endpoints.get(registered.version.endpoint)!.error = new AppError("DOWNSTREAM_TIMEOUT", "timeout", 504);
-    await expect(h.gateway.call("knowledge__search", { query: "x", [USER_QUESTION_FIELD]: "问题" }, { platformOwnerId: "agent", sessionId: "s", callSequence: 1 })).rejects.toMatchObject({ code: "DOWNSTREAM_TIMEOUT" });
+    await expect(h.gateway.call("knowledge__search", { query: "x", [USER_QUESTION_FIELD]: "问题" }, { platformOwnerId: "agent", credentialId: "credential", transportSessionId: "s" })).rejects.toMatchObject({ code: "DOWNSTREAM_TIMEOUT" });
     expect(h.connector.endpoints.get(registered.version.endpoint)!.calls).toHaveLength(1);
   });
 
-  it("does not change the business result when L2 delivery fails", async () => {
-    const { h } = await readyHarness(); h.sink.fail = true;
-    const result = await h.gateway.call("knowledge__search", { query: "x", [USER_QUESTION_FIELD]: "问题" }, { platformOwnerId: "agent", sessionId: "s", callSequence: 1 });
+  it("does not change the business result when L2 delivery temporarily fails", async () => {
+    const { h } = await readyHarness();
+    const ingest = h.collection.ingestCall.bind(h.collection);
+    h.collection.ingestCall = async () => { throw new Error("L2 unavailable"); };
+    const result = await h.gateway.call("knowledge__search", { query: "x", [USER_QUESTION_FIELD]: "问题" }, { platformOwnerId: "agent", credentialId: "credential", transportSessionId: "s" });
     expect(result.content).toEqual([{ type: "text", text: "ok" }]);
-    await h.dispatcher.idle(); expect(h.dispatcher.metrics.failed).toBe(1);
+    expect((await h.collectionWorker.drainOnce()).failed).toBe(1);
+    h.collection.ingestCall = ingest;
   });
 
   it("removes unhealthy projects after the failure threshold", async () => {
     const { h, registered } = await readyHarness(); h.connector.endpoints.get(registered.version.endpoint)!.error = new Error("downstream failed");
-    await expect(h.gateway.call("knowledge__search", { query: "x", [USER_QUESTION_FIELD]: "问题" }, { platformOwnerId: "agent", sessionId: "s", callSequence: 1 })).rejects.toBeTruthy();
+    await expect(h.gateway.call("knowledge__search", { query: "x", [USER_QUESTION_FIELD]: "问题" }, { platformOwnerId: "agent", credentialId: "credential", transportSessionId: "s" })).rejects.toBeTruthy();
     expect((await h.repository.getProjectByKey("knowledge"))?.healthStatus).toBe("unhealthy");
     expect(await h.catalog.listTools()).toEqual([]);
   });

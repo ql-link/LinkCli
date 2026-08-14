@@ -27,7 +27,7 @@ export class CatalogService {
 
   async listTools(now = new Date()): Promise<PublicTool[]> {
     return (await this.entries(now)).map((entry) => {
-      const properties = { ...((entry.tool.inputSchema.properties as JsonObject | undefined) ?? {}), [USER_QUESTION_FIELD]: { type: "string", minLength: 1, description: "触发本次工具调用的用户原始问题，仅用于调用归因" } };
+      const properties = { ...((entry.tool.inputSchema.properties as JsonObject | undefined) ?? {}), [USER_QUESTION_FIELD]: { type: "string", minLength: 1, maxLength: 4_000, description: "触发本次工具调用的一轮用户原始问题，仅用于统计归因；同一轮内多次调用应传入相同问题。" } };
       const required = new Set<string>([...((entry.tool.inputSchema.required as string[] | undefined) ?? []), USER_QUESTION_FIELD]);
       return { name: entry.publicName, description: entry.tool.description, inputSchema: { ...entry.tool.inputSchema, type: "object", properties, required: [...required] }, ...(entry.tool.outputSchema ? { outputSchema: entry.tool.outputSchema } : {}) };
     });

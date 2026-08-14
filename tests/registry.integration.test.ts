@@ -251,10 +251,10 @@ describe("M1 service registry and review", () => {
     const started = new Promise<void>((resolve) => { entered = resolve; });
     const originalCall = h.connector.callTool.bind(h.connector);
     h.connector.callTool = async (...args) => { entered(); await gate; return originalCall(...args); };
-    const inFlight = h.gateway.call("knowledge__search", { query: "old", __linkcli_user_question: "在途调用" }, { platformOwnerId: "agent", sessionId: "disable", callSequence: 1 });
+    const inFlight = h.gateway.call("knowledge__search", { query: "old", __linkcli_user_question: "在途调用" }, { platformOwnerId: "agent", credentialId: "credential", transportSessionId: "disable" });
     await started;
     await h.health.changeProjectStatus("knowledge", "disable", "owner-1", false);
-    await expect(h.gateway.call("knowledge__search", { query: "new", __linkcli_user_question: "新调用" }, { platformOwnerId: "agent", sessionId: "disable", callSequence: 2 })).rejects.toMatchObject({ code: "SERVICE_UNAVAILABLE" });
+    await expect(h.gateway.call("knowledge__search", { query: "new", __linkcli_user_question: "新调用" }, { platformOwnerId: "agent", credentialId: "credential", transportSessionId: "disable" })).rejects.toMatchObject({ code: "SERVICE_UNAVAILABLE" });
     release();
     await expect(inFlight).resolves.toMatchObject({ content: [{ type: "text", text: "ok" }] });
     expect(h.connector.endpoints.get(registered.version.endpoint)!.calls).toHaveLength(1);
