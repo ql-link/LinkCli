@@ -33,6 +33,7 @@ interface CallRow extends RowDataPacket {
   project_id: string;
   project_key: string;
   tool_name: string;
+  module_key: string | null;
   arguments_summary: unknown;
   call_status: string;
   outcome: string;
@@ -135,11 +136,16 @@ export class AnalysisOutboxWorker {
     if (currentVersion > event.settlementVersion) return null;
     if (currentVersion !== event.settlementVersion) throw new AnalysisOutboxError("ANALYSIS_REVISION_MISMATCH");
     if (!turn.user_question?.trim()) throw new AnalysisOutboxError("ANALYSIS_QUERY_MISSING");
-    const [callRows] = await this.pool.query<CallRow[]>(`SELECT project_id,project_key,tool_name,arguments_summary,call_status,outcome
-      FROM mcp_call_events WHERE turn_id=? ORDER BY started_at,ingress_order,event_id`, [event.turnId]);
+    // module_key 解析：按调用所属项目当前生效版本的工具登记信息取值。未登记模块的工具返回 NULL，
+    // 由 modulePathOf 统一按“模块归属未登记”处理，不回退到用 project_key 代替 Module（MCPSTAT-1-L3 §6.1）。
+    const [callRows] = await this.pool.query<CallRow[]>(`SELECT e.project_id,e.project_key,e.tool_name,t.module_key,e.arguments_summary,e.call_status,e.outcome
+      FROM mcp_call_events e
+      LEFT JOIN mcp_projects p ON p.id=e.project_id
+      LEFT JOIN mcp_tool_versions t ON t.service_version_id=p.active_version_id AND t.original_name=e.tool_name
+      WHERE e.turn_id=? ORDER BY e.started_at,e.ingress_order,e.event_id`, [event.turnId]);
     if (!callRows.length) throw new AnalysisOutboxError("ANALYSIS_CALLS_MISSING");
     const calls: AnalysisCall[] = callRows.map((call, index) => ({
-      sequence:index+1,projectId:String(call.project_id),moduleId:String(call.project_key),toolName:String(call.tool_name),operation:operationOf(String(call.tool_name)),
+      sequence:index+1,projectId:String(call.project_id),moduleId:call.module_key ?? undefined,toolName:String(call.tool_name),operation:operationOf(String(call.tool_name)),
       parameterKeys:parameterKeysOf(call.arguments_summary),outcome:call.outcome === "success" ? "success" : "error",
     }));
     const partial = callRows.some((call) => call.call_status === "partial");

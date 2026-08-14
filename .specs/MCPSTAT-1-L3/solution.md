@@ -9,7 +9,7 @@
 | 下游 | L4 闭环层：生成、扩展、验证和发布 Skill |
 | 核心边界 | L2 不判断 Query 属于哪个 Skill；L3 不生成 Skill，也不调用业务 MCP |
 | 处理方式 | L2 实时记录，L3 定时批量聚类与统计，不进入用户实时调用链路 |
-| 当前状态 | 核心分类原则已确认；稳定 Module 标识、语义模型和阈值仍需在真实数据实验后冻结 |
+| 当前状态 | 核心分类原则已确认；稳定 Module 标识来源与语义模型/质心/阈值的技术方案已冻结（2026-08-14），具体阈值数值仍需在真实数据实验后二次确认 |
 
 ## 1. 结论
 
@@ -136,7 +136,9 @@ flowchart LR
 
 L3 对 Query 做无损规范化，例如统一空白、大小写和明显的格式差异，但保留业务对象、条件、动作和否定词。参数值不进入 Query 类别硬键，避免不同客户 ID、订单 ID 把同类需求拆散。
 
-每条调用事实必须通过调用发生时的 MCP 注册快照解析为稳定的 `project_id/module_id/tool_id`。Project 是业务项目或产品域，Module 是用户、订单、资产等业务能力边界，Tool 是具体查询、修改或删除动作。不得将 Project 直接当作 Module，也不得根据 Tool 名猜测 Module。当前注册模型缺少独立 Module 实体，这是正式聚类前必须补齐的实现前提，而不是用 Project 代替的理由。
+每条调用事实必须通过调用发生时的 MCP 注册快照解析为稳定的 `project_id/module_id/tool_id`。Project 是业务项目或产品域，Module 是用户、订单、资产等业务能力边界，Tool 是具体查询、修改或删除动作。不得将 Project 直接当作 Module，也不得根据 Tool 名猜测 Module。
+
+**Module 来源（已冻结）**：已冻结的 MCPSTAT-1-L1 方案（D10）在 `mcp_tool_versions` 增加了 `module_key` 字段，登记或提交新版本时由项目负责人显式指定，L1 本层不消费该字段。`module_id` 直接取该字段值；因为 `mcp_tool_versions` 本身是不可变版本，`module_key` 天然随服务版本一起快照，不需要 L3 额外维护版本对照。`module_key` 为空的工具视为“模块归属未登记”，其调用事实不能贡献有效的 `module_path`——按 §4.2 的定义，只要一轮调用中出现任意一次 `module_key` 缺失的工具，整轮记录的 `modulePath` 为 `null`，归入未覆盖 Query 池（§8.1），不进入正常候选范围，倒逼项目负责人补齐登记而不是让 L3 静默降级成 Project 级分桶。
 
 ### 6.2 第二步：构造候选范围
 
@@ -163,11 +165,46 @@ project_scope + ordered_module_path
 新记录只与同一候选范围内的 Query 类别比较：
 
 1. 先用文本指纹识别完全相同或仅参数不同的 Query。
-2. 再用本地语义模型计算与各类别代表 Query 的相似度。
-3. 超过加入阈值时归入得分最高的类别；否则新建类别。
+2. 再用语义模型计算与各类别语义中心的相似度。
+3. 超过加入阈值时归入得分最高的类别；否则暂不建类，进入本候选范围的待聚合池，等待批次周期性重聚合时再决定是否成类。
 4. 周期性执行合并与拆分检查，修正增量聚类的先后顺序误差。
 
 不能仅凭“查询、修改、删除”动作不同就拆分类别。这些动作被提取成 `scene_type`，用于描述 Skill 应覆盖的子场景和风险等级。
+
+**规范化边界（已冻结）**：§6.1 的“无损规范化”只做 Unicode 规范化、大小写统一、空白折叠，**不删除或替换任何词**，包括动作词、填充词。之前实现里用正则整体删除动作词、填充词的做法违反本节要求：一是替换没有词边界，会把普通单词内部的字符一并删掉；二是删词本身就丢失了语义模型判断意图所需的信息。动作词只在 §6.4 场景归纳阶段被识别和标注，不在规范化阶段被抹除。
+
+**语义模型（已冻结，具体后端可配置）**：L3 通过 `EmbeddingProvider` 接口获取 Query 的稠密向量表示，不绑定具体实现：
+
+```ts
+interface EmbeddingProvider {
+  readonly modelVersion: string; // 写入 mcp_query_cluster.embedding_model_version，模型切换后据此分批重算
+  embed(texts: string[]): Promise<number[][]>;
+}
+```
+
+首版提供两种可选实现，通过配置切换，二者对上层聚类逻辑完全透明：
+
+- `LocalEmbeddingProvider`：进程内加载开源多语言句向量模型（transformers.js + ONNX），不出网、不依赖外部服务。
+- `RemoteEmbeddingProvider`：调用可配置的远程 Embedding API（含请求签名与超时控制），供后续接入企业内部或第三方 Embedding 服务（例如通义千问 Embedding）时使用；具体端点、鉴权方式和模型名称由部署配置提供，不写死在代码里。
+
+两种实现输出的向量维度必须一致声明在配置中；`embedding_model_version` 编码为 `<provider>:<model_name>:<dim>`，同一批次内混用不同版本的向量不能直接比较，`ClusterRebuildJob`（见下）发现质心版本与新向量版本不一致时，先只用相同版本的向量比较，跨版本比较等旧向量按新版本重算后再进行。
+
+**类别语义中心（已冻结）**：`mcp_query_cluster` 增加质心字段，取类别内全部成员向量的算术平均（不是单条代表 Query），并保留 `representative_query`/`representative_event_id` 用于人工查看和向 L4 交付时的可读展示，两者不互相替代——质心决定聚类判断，代表 Query 只做展示。质心随成员增删增量更新：`new_centroid = (old_centroid * old_count + new_vector) / (old_count + 1)`，成员被移出类别（合并、拆分）时按同样方式做减法重算，不做简单覆盖。
+
+**加入 / 合并 / 拆分阈值（已冻结方法论，数值待压测）**：不沿用之前实现里的字符 Jaccard 阈值 0.82。新的加入阈值 `joinSimilarity` 定义在 cosine 相似度空间，取值方法：
+
+1. 用 §15.1 的标注测试集（同类别不同表达 + 跨类别相似表达的边界样例）计算全部“标注同类”对和“标注不同类”对的 cosine 相似度分布；
+2. 取两个分布之间 F1 最优的切点作为初始阈值，按 `project_scope + module_path` 分桶分别校准，全局阈值只作兜底；
+3. 阈值连同标定所用的模型版本和标注集版本一起持久化在配置里，变更任一项都需要重新校准，不能只改数字。
+
+在阈值正式压测通过前，新阈值只能用于影子运行（只记录、不改变实际候选投递），沿用现有生产阈值直到用户确认切换。
+
+**周期性合并与拆分（已冻结，此前未实现）**：新增 `ClusterRebuildJob`，与在线单点匹配（上文步骤 1–3）配合工作，解决纯增量匹配的顺序敏感和碎片化问题：
+
+- 触发周期与批处理调度对齐但独立执行，避免长期占用成员表；
+- 对每个候选范围（`project_scope + module_path_hash`），取该范围内全部“观察中”类别的质心 + 待聚合池中未成类的向量，做一次层次聚合聚类（average-linkage、cosine 距离），按当前冻结阈值切分；
+- 切分结果与现状比较：待聚合池中达到最小成员数的子集升级为新类别；两个历史类别质心距离低于合并阈值时触发合并（迁移全部成员并重算目标质心，旧类别标记为 `已合并` 并记录 `merged_into_cluster_id`）；单个类别内部方差显著高于同范围其他类别时标记为待人工复核，不自动拆分执行前先记录评分历史；
+- 全过程写入 `mcp_cluster_score_history`，保证任意一次合并/拆分可追溯到具体阈值、模型版本和触发批次。
 
 ### 6.4 第四步：场景归纳
 
@@ -193,7 +230,9 @@ L3 评估的是“这个 Query 类别是否值得交给 L4”，不是直接判�
 | 独立用户数 | ≥ 5 | 排除单人重复重试 |
 | 时间跨度 | ≥ 3 天 | 排除一次性热点 |
 | 输入完整率 | ≥ 95% | 保证模块路径和结果可解释 |
-| 类内语义内聚度 | ≥ 0.82 | 防止不同目标误并 |
+| 类内语义内聚度 | ≥ 0.82（cosine 空间，随 §6.3 阈值校准同步调整） | 防止不同目标误并 |
+
+“有效 Query 数 ≥ 20”本身已经是内聚度指标的前置门槛：类别未达到最小成员数时，`semantic_cohesion` 不参与候选判断，也不能在监控和人工查看中被解读为“聚合质量达标”——单成员类别的内聚度恒为 1（自己和自己比较），这是数值定义决定的，不代表这条 Query 已经完成有效聚合。运维看板展示类别列表时，未达最小成员数的类别标注为“观察中·样本不足”，不与已过基础门槛的类别使用同一套质量呈现。
 
 达到以上基础门槛后，再按需求类型分流：
 
@@ -332,6 +371,8 @@ CREATE TABLE mcp_query_cluster (
     attempted_skill_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
     semantic_cohesion DECIMAL(6,5) NULL,
     input_completeness DECIMAL(6,5) NULL,
+    centroid_vector JSON NULL COMMENT '类别语义中心，成员向量算术平均，随成员增减增量更新',
+    embedding_model_version VARCHAR(96) NULL COMMENT '<provider>:<model_name>:<dim>，模型切换后据此分批重算',
     first_seen_at DATETIME(3) NOT NULL,
     last_seen_at DATETIME(3) NOT NULL,
     cooldown_until DATETIME(3) NULL,
@@ -341,6 +382,7 @@ CREATE TABLE mcp_query_cluster (
     PRIMARY KEY (id),
     UNIQUE KEY uk_query_cluster_key (cluster_key),
     KEY idx_query_cluster_candidate (status, last_seen_at),
+    KEY idx_query_cluster_model_version (embedding_model_version),
     CONSTRAINT fk_query_cluster_merged_into
         FOREIGN KEY (merged_into_cluster_id) REFERENCES mcp_query_cluster(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
@@ -350,6 +392,7 @@ CREATE TABLE mcp_query_cluster_member (
     cluster_id BIGINT UNSIGNED NOT NULL,
     analysis_input_id BIGINT UNSIGNED NOT NULL,
     semantic_similarity DECIMAL(6,5) NOT NULL,
+    query_vector JSON NULL COMMENT '该成员的 Query 向量，供质心增量重算和 ClusterRebuildJob 使用',
     scene_type VARCHAR(191) NULL,
     threshold_eligible TINYINT(1) NOT NULL DEFAULT 1,
     quality_success TINYINT(1) NOT NULL DEFAULT 0,
@@ -480,15 +523,16 @@ L3 发给 L4 的候选至少包含：
 - `AnalysisInputConsumer`：幂等接收 L2 完整结算事件。
 - `AnalysisOutboxWorker`：租约领取 L2 分析 Outbox，关联轮次和调用明细后转换为 L3 输入，成功后确认投递，失败则退避或死信。
 - `AnalysisBatchScheduler`：按固定周期触发批处理；同一时刻只允许一个实例取得任务锁。
-- `ModulePathResolver`：校验 MCP 注册快照并生成有序模块路径。
-- `QueryClusterer`：候选范围检索、语义归类、新建、合并和拆分。
+- `ModulePathResolver`：校验 MCP 注册快照并生成有序模块路径，读取 `mcp_tool_versions.module_key`。
+- `EmbeddingProvider`：Query 向量化，`LocalEmbeddingProvider`（进程内开源多语言模型）与 `RemoteEmbeddingProvider`（可配置远程 Embedding API）两种实现按部署配置切换。
+- `QueryClusterer`：候选范围检索、按质心做在线语义归类、新建类别或计入待聚合池。
+- `ClusterRebuildJob`：周期性对每个候选范围做批内层次聚合聚类，执行合并、待聚合池升级和高方差类别标记，修正在线增量匹配的顺序敏感问题；模型版本或阈值变更后的全量重算复用同一组件。
 - `SceneExtractor`：把具体 Tool 调用归纳为组内场景。
 - `CoverageGapDetector`：识别已有 Skill 的不覆盖、部分覆盖和误匹配。
 - `ClusterMetricService`：统计频次、用户数、跨度、成功率和质量分。
 - `CandidateGate`：判断新 Skill、扩展 Skill或未覆盖需求是否达标。
 - `L4CandidateOutboxWorker`：可靠投递候选。
 - `ValidationFeedbackConsumer`：接收 L4 回放和数据库校验结论。
-- `ClusterRebuildJob`：在模型、阈值或模块映射变化后可重算。
 
 ### 12.2 一致性与并发
 
@@ -529,6 +573,7 @@ src/analysis/
   input-consumer.ts
   batch-scheduler.ts
   module-path.ts
+  embedding-provider.ts
   query-clusterer.ts
   scene-extractor.ts
   coverage-gap.ts
@@ -560,6 +605,9 @@ tests/
 ### 15.1 必测场景
 
 - “查用户 → 查订单”“查用户 → 改订单”“查用户 → 删订单”归入同一 Query 类别，并形成三个场景。
+- 同一业务意图的多种自然语言表达（改写句式、同义替换、疑问句与陈述句混用，而非仅单复数或标点差异）能被归入同一类别；相似措辞但业务模块路径不同的 Query 不会被误并。
+- 单成员类别的 `semantic_cohesion` 不出现在候选判断和运维展示的“质量达标”语境中；达到最小成员数后才按正常质量口径展示。
+- 模块归属未登记（`module_key` 为空）的工具参与的调用轮次进入未覆盖 Query 池，不静默按 Project 分桶。
 - “查用户 → 查资产”不进入“用户 → 订单”类别。
 - 相同模块路径但语义目标明显不同的 Query 不被误并。
 - Tool 名或参数值不同，但模块路径与需求相同的记录仍可归为一类。
@@ -588,11 +636,15 @@ tests/
 
 ## 16. 待冻结项
 
-核心分类原则已确认，仍需冻结以下配置和契约：
+核心分类原则已确认，本次（2026-08-14）新冻结以下两项：
 
-- MCP 注册信息中稳定的 `module_id` 和版本快照字段。
-- Query 语义模型、类别语义中心表示、加入阈值、合并阈值和拆分规则。
-- 频次、用户数、时间跨度、成功率与覆盖缺口的正式门槛。
+- ~~MCP 注册信息中稳定的 `module_id` 和版本快照字段。~~ 已冻结：复用 MCPSTAT-1-L1 D10 新增的 `mcp_tool_versions.module_key`，见 §6.1。
+- ~~Query 语义模型、类别语义中心表示、加入阈值、合并阈值和拆分规则。~~ 方法论已冻结，见 §6.3：`EmbeddingProvider` 可插拔接口、质心增量更新、基于标注数据的阈值校准流程、`ClusterRebuildJob` 周期合并拆分。**具体阈值数值、Embedding 后端配置（本地模型 or 远程 API 及其参数）仍待用户提供后确定，确定前只能用于影子运行。**
+
+仍待冻结：
+
+- 频次、用户数、时间跨度、成功率与覆盖缺口的正式门槛（依赖真实数据压测，见 §7.1）。
+- §6.3 标注测试集的构建标准：需要覆盖“同类别不同表达”“跨类别相似表达”两类边界样例，不能只用单复数变化等表层差异的样本，标注准则需明确“语义相似”与“应归入同一候选类别”并非等价——测试集本身也是阈值校准的输入,必须先于阈值数值冻结。
 - L4 Skill 元数据中“已声明覆盖场景”的读取契约。
 - L4 数据库反向校验的隔离环境、权限和结果回流格式。
 - 宿主零调用或未命中 MCP Query 的轮次结束契约。

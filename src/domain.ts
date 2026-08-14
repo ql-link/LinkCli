@@ -41,6 +41,7 @@ export interface ToolVersion {
   id: string;
   serviceVersionId: string;
   originalName: string;
+  moduleKey: string | null;
   description: string;
   inputSchema: JsonObject;
   outputSchema: JsonObject | null;

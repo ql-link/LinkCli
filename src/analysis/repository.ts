@@ -9,9 +9,12 @@ export interface AnalysisRepository {
   listCandidateClusters(type: QueryCluster["clusterType"], projectScope: string | null, modulePathHash: string | null): Promise<QueryCluster[]>;
   createCluster(cluster: Omit<QueryCluster, "id">): Promise<QueryCluster>;
   addMember(member: ClusterMember): Promise<boolean>;
+  listMemberVectors(clusterId: number): Promise<number[][]>;
+  updateCentroid(clusterId: number, centroidVector: number[], embeddingModelVersion: string): Promise<void>;
   upsertScene(scene: ClusterScene): Promise<void>;
   addCoverageGap(gap: CoverageGap): Promise<boolean>;
   recalculateCluster(clusterId: number): Promise<QueryCluster>;
+  mergeClusters(targetClusterId: number, sourceClusterId: number): Promise<void>;
   appendScore(clusterId: number, clusterVersion: number, scoreType: string, scoreValue: number | null, reason: Record<string, unknown>): Promise<void>;
   handOffCandidate(clusterId: number, event: CandidateEvent): Promise<boolean>;
   markAnalyzed(inputId: number, analyzedAt: Date): Promise<void>;
@@ -80,6 +83,13 @@ export class MemoryAnalysisRepository implements AnalysisRepository {
     if (this.members.some((item) => item.analysisInputId === member.analysisInputId)) return false;
     this.members.push(clone(member)); return true;
   }
+  async listMemberVectors(clusterId: number): Promise<number[][]> {
+    return clone(this.members.filter((item) => item.clusterId === clusterId && item.queryVector).map((item) => item.queryVector!));
+  }
+  async updateCentroid(clusterId: number, centroidVector: number[], embeddingModelVersion: string): Promise<void> {
+    const cluster = this.clusters.find((item) => item.id === clusterId);
+    if (cluster) { cluster.centroidVector = clone(centroidVector); cluster.embeddingModelVersion = embeddingModelVersion; }
+  }
   async upsertScene(scene: ClusterScene): Promise<void> {
     const key = `${scene.clusterId}:${scene.sceneKey}`; const current = this.scenes.get(key);
     if (current) { current.sampleCount += 1; current.successCount += scene.succeeded ? 1 : 0; current.scene.occurredAt = scene.occurredAt; }
@@ -104,6 +114,11 @@ export class MemoryAnalysisRepository implements AnalysisRepository {
     cluster.lastSeenAt = new Date(Math.max(...inputs.map((input) => input.occurredAt.getTime())));
     cluster.version += 1;
     return clone(cluster);
+  }
+  async mergeClusters(targetClusterId: number, sourceClusterId: number): Promise<void> {
+    for (const member of this.members) if (member.clusterId === sourceClusterId) member.clusterId = targetClusterId;
+    const source = this.clusters.find((item) => item.id === sourceClusterId);
+    if (source) { source.status = "merged"; source.mergedIntoClusterId = targetClusterId; }
   }
   async appendScore(): Promise<void> {}
   async handOffCandidate(clusterId: number, event: CandidateEvent): Promise<boolean> {
@@ -131,8 +146,10 @@ function inputFrom(row: RowDataPacket): AnalysisInput {
 }
 function clusterFrom(row: RowDataPacket): QueryCluster {
   return { id:Number(row.id),clusterKey:row.cluster_key,clusterType:row.cluster_type,projectScope:row.project_scope,modulePathHash:row.module_path_hash,modulePath:row.module_path===null?null:parseJson<string[]>(row.module_path),
-    representativeEventId:row.representative_event_id,representativeQuery:row.representative_query,status:row.status,sampleCount:Number(row.sample_count),distinctActorCount:Number(row.distinct_actor_count),successCount:Number(row.success_count),
-    coverageGapCount:Number(row.coverage_gap_count),attemptedSkillCount:Number(row.attempted_skill_count),semanticCohesion:Number(row.semantic_cohesion ?? 0),inputCompleteness:Number(row.input_completeness ?? 0),firstSeenAt:toDate(row.first_seen_at),lastSeenAt:toDate(row.last_seen_at),version:Number(row.version) };
+    representativeEventId:row.representative_event_id,representativeQuery:row.representative_query,status:row.status,mergedIntoClusterId:row.merged_into_cluster_id===null||row.merged_into_cluster_id===undefined?null:Number(row.merged_into_cluster_id),sampleCount:Number(row.sample_count),distinctActorCount:Number(row.distinct_actor_count),successCount:Number(row.success_count),
+    coverageGapCount:Number(row.coverage_gap_count),attemptedSkillCount:Number(row.attempted_skill_count),semanticCohesion:Number(row.semantic_cohesion ?? 0),inputCompleteness:Number(row.input_completeness ?? 0),
+    centroidVector:row.centroid_vector===null||row.centroid_vector===undefined?null:parseJson<number[]>(row.centroid_vector),embeddingModelVersion:row.embedding_model_version??null,
+    firstSeenAt:toDate(row.first_seen_at),lastSeenAt:toDate(row.last_seen_at),version:Number(row.version) };
 }
 
 export class MySqlAnalysisRepository implements AnalysisRepository {
@@ -161,8 +178,14 @@ export class MySqlAnalysisRepository implements AnalysisRepository {
   }
   async listPendingInputs(limit: number): Promise<AnalysisInput[]> { const [rows]=await this.executor.query<RowDataPacket[]>("SELECT * FROM mcp_analysis_input WHERE analyzed_at IS NULL ORDER BY occurred_at,id LIMIT ?",[limit]); return rows.map(inputFrom); }
   async listCandidateClusters(type: QueryCluster["clusterType"],projectScope:string|null,modulePathHash:string|null):Promise<QueryCluster[]>{const [rows]=await this.executor.query<RowDataPacket[]>(`SELECT c.*,i.query_text representative_query FROM mcp_query_cluster c JOIN mcp_analysis_input i ON i.event_id=c.representative_event_id WHERE c.cluster_type=? AND c.project_scope <=> ? AND c.module_path_hash <=> ? AND c.status NOT IN ('merged','retired')`,[type,projectScope,modulePathHash]);return rows.map(clusterFrom);}
-  async createCluster(cluster:Omit<QueryCluster,"id">):Promise<QueryCluster>{const [result]=await this.executor.execute<ResultSetHeader>(`INSERT INTO mcp_query_cluster (cluster_key,cluster_type,project_scope,module_path_hash,module_path,representative_event_id,status,sample_count,distinct_actor_count,success_count,coverage_gap_count,attempted_skill_count,semantic_cohesion,input_completeness,first_seen_at,last_seen_at,version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,[cluster.clusterKey,cluster.clusterType,cluster.projectScope,cluster.modulePathHash,cluster.modulePath?JSON.stringify(cluster.modulePath):null,cluster.representativeEventId,cluster.status,cluster.sampleCount,cluster.distinctActorCount,cluster.successCount,cluster.coverageGapCount,cluster.attemptedSkillCount,cluster.semanticCohesion,cluster.inputCompleteness,cluster.firstSeenAt,cluster.lastSeenAt,cluster.version]);return{...cluster,id:result.insertId};}
-  async addMember(member:ClusterMember):Promise<boolean>{const [result]=await this.executor.execute<ResultSetHeader>("INSERT IGNORE INTO mcp_query_cluster_member (cluster_id,analysis_input_id,semantic_similarity,scene_type,threshold_eligible,quality_success,exclusion_reason) VALUES (?,?,?,?,?,?,?)",[member.clusterId,member.analysisInputId,member.semanticSimilarity,member.sceneType,member.thresholdEligible,member.qualitySuccess,member.exclusionReason]);return result.affectedRows===1;}
+  async createCluster(cluster:Omit<QueryCluster,"id">):Promise<QueryCluster>{const [result]=await this.executor.execute<ResultSetHeader>(`INSERT INTO mcp_query_cluster (cluster_key,cluster_type,project_scope,module_path_hash,module_path,representative_event_id,status,sample_count,distinct_actor_count,success_count,coverage_gap_count,attempted_skill_count,semantic_cohesion,input_completeness,centroid_vector,embedding_model_version,first_seen_at,last_seen_at,version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,[cluster.clusterKey,cluster.clusterType,cluster.projectScope,cluster.modulePathHash,cluster.modulePath?JSON.stringify(cluster.modulePath):null,cluster.representativeEventId,cluster.status,cluster.sampleCount,cluster.distinctActorCount,cluster.successCount,cluster.coverageGapCount,cluster.attemptedSkillCount,cluster.semanticCohesion,cluster.inputCompleteness,cluster.centroidVector?JSON.stringify(cluster.centroidVector):null,cluster.embeddingModelVersion,cluster.firstSeenAt,cluster.lastSeenAt,cluster.version]);return{...cluster,id:result.insertId};}
+  async addMember(member:ClusterMember):Promise<boolean>{const [result]=await this.executor.execute<ResultSetHeader>("INSERT IGNORE INTO mcp_query_cluster_member (cluster_id,analysis_input_id,semantic_similarity,query_vector,scene_type,threshold_eligible,quality_success,exclusion_reason) VALUES (?,?,?,?,?,?,?,?)",[member.clusterId,member.analysisInputId,member.semanticSimilarity,member.queryVector?JSON.stringify(member.queryVector):null,member.sceneType,member.thresholdEligible,member.qualitySuccess,member.exclusionReason]);return result.affectedRows===1;}
+  async listMemberVectors(clusterId:number):Promise<number[][]>{const [rows]=await this.executor.query<RowDataPacket[]>("SELECT query_vector FROM mcp_query_cluster_member WHERE cluster_id=? AND query_vector IS NOT NULL",[clusterId]);return rows.map((row)=>parseJson<number[]>(row.query_vector));}
+  async updateCentroid(clusterId:number,centroidVector:number[],embeddingModelVersion:string):Promise<void>{await this.executor.execute("UPDATE mcp_query_cluster SET centroid_vector=?,embedding_model_version=? WHERE id=?",[JSON.stringify(centroidVector),embeddingModelVersion,clusterId]);}
+  async mergeClusters(targetClusterId:number,sourceClusterId:number):Promise<void>{
+    await this.executor.execute("UPDATE mcp_query_cluster_member SET cluster_id=? WHERE cluster_id=?",[targetClusterId,sourceClusterId]);
+    await this.executor.execute("UPDATE mcp_query_cluster SET status='merged',merged_into_cluster_id=? WHERE id=?",[targetClusterId,sourceClusterId]);
+  }
   async upsertScene(scene:ClusterScene):Promise<void>{const success=scene.succeeded?1:0;await this.executor.execute(`INSERT INTO mcp_query_cluster_scene (cluster_id,scene_key,scene_type,tool_path,risk_level,sample_count,success_count,flow_stability,first_seen_at,last_seen_at) VALUES (?,?,?,?,?,1,?,?,?,?) ON DUPLICATE KEY UPDATE sample_count=sample_count+1,success_count=success_count+VALUES(success_count),flow_stability=success_count/sample_count,last_seen_at=GREATEST(last_seen_at,VALUES(last_seen_at))`,[scene.clusterId,scene.sceneKey,scene.sceneType,JSON.stringify(scene.toolPath),scene.riskLevel,success,success,scene.occurredAt,scene.occurredAt]);}
   async addCoverageGap(gap:CoverageGap):Promise<boolean>{const [result]=await this.executor.execute<ResultSetHeader>("INSERT IGNORE INTO mcp_skill_coverage_gap (cluster_id,analysis_input_id,attempted_skill_id,attempted_skill_version,gap_type,evidence) VALUES (?,?,?,?,?,?)",[gap.clusterId,gap.analysisInputId,gap.attemptedSkillId,gap.attemptedSkillVersion,gap.gapType,JSON.stringify(gap.evidence)]);return result.affectedRows===1;}
   async recalculateCluster(clusterId:number):Promise<QueryCluster>{await this.executor.execute(`UPDATE mcp_query_cluster c SET sample_count=(SELECT COUNT(*) FROM mcp_query_cluster_member m WHERE m.cluster_id=c.id AND m.threshold_eligible=1),distinct_actor_count=(SELECT COUNT(DISTINCT i.actor_hash) FROM mcp_query_cluster_member m JOIN mcp_analysis_input i ON i.id=m.analysis_input_id WHERE m.cluster_id=c.id),success_count=(SELECT COUNT(*) FROM mcp_query_cluster_member m WHERE m.cluster_id=c.id AND m.quality_success=1),coverage_gap_count=(SELECT COUNT(*) FROM mcp_skill_coverage_gap g WHERE g.cluster_id=c.id),attempted_skill_count=(SELECT COUNT(*) FROM mcp_query_cluster_member m JOIN mcp_analysis_input i ON i.id=m.analysis_input_id WHERE m.cluster_id=c.id AND i.attempted_skill_id IS NOT NULL),semantic_cohesion=(SELECT COALESCE(AVG(m.semantic_similarity),0) FROM mcp_query_cluster_member m WHERE m.cluster_id=c.id),input_completeness=(SELECT COALESCE(AVG(i.collection_trust='trusted' AND (c.cluster_type='uncovered' OR i.module_path_hash IS NOT NULL)),0) FROM mcp_query_cluster_member m JOIN mcp_analysis_input i ON i.id=m.analysis_input_id WHERE m.cluster_id=c.id),first_seen_at=(SELECT MIN(i.occurred_at) FROM mcp_query_cluster_member m JOIN mcp_analysis_input i ON i.id=m.analysis_input_id WHERE m.cluster_id=c.id),last_seen_at=(SELECT MAX(i.occurred_at) FROM mcp_query_cluster_member m JOIN mcp_analysis_input i ON i.id=m.analysis_input_id WHERE m.cluster_id=c.id),version=version+1 WHERE c.id=?`,[clusterId]);const [rows]=await this.executor.query<RowDataPacket[]>(`SELECT c.*,i.query_text representative_query FROM mcp_query_cluster c JOIN mcp_analysis_input i ON i.event_id=c.representative_event_id WHERE c.id=?`,[clusterId]);if(!rows[0])throw new Error(`Cluster not found: ${clusterId}`);return clusterFrom(rows[0]);}

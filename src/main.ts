@@ -1,9 +1,11 @@
 import { createPool } from "mysql2/promise";
 import { AnalysisBatchScheduler } from "./analysis/batch-scheduler.js";
 import { AnalysisBatchService } from "./analysis/batch-service.js";
+import { DeterministicFallbackEmbeddingProvider, RemoteEmbeddingProvider, type EmbeddingProvider } from "./analysis/embedding-provider.js";
 import { AnalysisInputConsumer } from "./analysis/input-consumer.js";
 import { AnalysisOutboxWorker } from "./analysis/outbox-worker.js";
 import { MySqlAnalysisRepository } from "./analysis/repository.js";
+import { ClusterRebuildJob } from "./analysis/rebuild.js";
 import { MySqlIdentityRepository } from "./auth/repository.js";
 import { IdentityService } from "./auth/service.js";
 import { createApp } from "./app.js";
@@ -47,7 +49,14 @@ async function main(): Promise<void> {
   const retention = new RetentionService(collection, config.COLLECTION_DETAIL_RETENTION_DAYS, config.COLLECTION_OUTBOX_RETENTION_DAYS);
   const gateway = new GatewayRouter(repository, catalog, connector, cipher, health, collection, fingerprintKey, config.MCP_CALL_TIMEOUT_MS);
   const statistics = new StatisticsService(collection, repository);
-  const analysis = new AnalysisBatchService(analysisRepository, {
+  let embeddings: EmbeddingProvider;
+  if (config.L3_EMBEDDING_ENDPOINT && config.L3_EMBEDDING_API_KEY && config.L3_EMBEDDING_MODEL && config.L3_EMBEDDING_DIMENSIONS) {
+    embeddings = new RemoteEmbeddingProvider({ endpoint: config.L3_EMBEDDING_ENDPOINT, apiKey: config.L3_EMBEDDING_API_KEY, model: config.L3_EMBEDDING_MODEL, dimensions: config.L3_EMBEDDING_DIMENSIONS, timeoutMs: config.MCP_CALL_TIMEOUT_MS });
+  } else {
+    console.warn("L3_EMBEDDING_* is not fully configured; falling back to a non-semantic word-ngram provider. Candidates produced under this provider are for shadow evaluation only (see MCPSTAT-1-L3 §16).");
+    embeddings = new DeterministicFallbackEmbeddingProvider();
+  }
+  const analysisThresholds = {
     minimumSamples: config.L3_MINIMUM_SAMPLES,
     minimumActors: config.L3_MINIMUM_ACTORS,
     minimumSpanMs: config.L3_MINIMUM_SPAN_MS,
@@ -57,8 +66,12 @@ async function main(): Promise<void> {
     minimumCoverageGapCount: config.L3_MINIMUM_COVERAGE_GAPS,
     minimumCoverageGapRatio: config.L3_MINIMUM_COVERAGE_GAP_RATIO,
     joinSimilarity: config.L3_JOIN_SIMILARITY,
-  });
+    mergeSimilarity: config.L3_MERGE_SIMILARITY,
+    minimumRebuildMembers: config.L3_MINIMUM_REBUILD_MEMBERS,
+  };
+  const analysis = new AnalysisBatchService(analysisRepository, embeddings, analysisThresholds);
   const analysisScheduler = new AnalysisBatchScheduler(analysis, config.L3_BATCH_INTERVAL_MS, config.L3_BATCH_SIZE, (error) => console.error("L3 analysis batch failed", error));
+  const rebuildJob = new ClusterRebuildJob(analysisRepository, analysisThresholds);
   const analysisOutboxWorker = new AnalysisOutboxWorker(pool, analysisInputConsumer, { batchSize:config.COLLECTION_WORKER_BATCH_SIZE,leaseMs:config.COLLECTION_LEASE_MS,maxAttempts:config.COLLECTION_MAX_DELIVERY_ATTEMPTS,retryBaseMs:config.COLLECTION_WORKER_INTERVAL_MS });
   const app = createApp(
     { projects, reviews, health, credentials, catalog, gateway, collection }, config.ADMIN_API_KEY, config.HOST, config.MCP_ALLOWED_HOSTS,
@@ -68,6 +81,8 @@ async function main(): Promise<void> {
   const healthTimer = setInterval(() => { void health.probeActiveProjects(); void health.emitStaleAlerts(); }, Math.min(config.HEALTH_STALE_AFTER_MS / 2, 30_000));
   healthTimer.unref();
   if (config.L3_BATCH_ENABLED) analysisScheduler.start();
+  const rebuildTimer = setInterval(() => { void rebuildJob.runOnce().catch((error) => console.error("L3 cluster rebuild failed", error)); }, config.L3_REBUILD_INTERVAL_MS);
+  rebuildTimer.unref();
   let collectionTask: Promise<void> | null = null;
   const collectionTimer = setInterval(() => {
     if (collectionTask) return;
@@ -79,7 +94,7 @@ async function main(): Promise<void> {
   let shuttingDown = false;
   const shutdown = async (): Promise<void> => {
     if (shuttingDown) return; shuttingDown = true;
-    clearInterval(healthTimer); clearInterval(collectionTimer); clearInterval(retentionTimer);
+    clearInterval(healthTimer); clearInterval(collectionTimer); clearInterval(retentionTimer); clearInterval(rebuildTimer);
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await analysisScheduler.stop(); await collectionTask; await pool.end();
   };
