@@ -14,6 +14,7 @@ const versionSchema = z.object({ endpoint: z.string(), projectToken: z.string().
 const reviewSchema = z.object({ decision: z.enum(["approved", "rejected"]), comment: z.string().optional() });
 const statusSchema = z.object({ action: z.enum(["disable", "enable", "retire"]) });
 const bypassSchema = z.object({ enabled: z.boolean() });
+const toolModuleSchema = z.object({ moduleKey: z.string().min(1).nullable() });
 const credentialSchema = z.object({ credentialName: z.string(), expiresAt: z.string().datetime().nullable().optional() });
 
 declare global { namespace Express { interface Request { platformIdentity?: PlatformIdentity; } } }
@@ -67,6 +68,10 @@ export function createAdminRouter(services: AdminServices, adminApiKey: string):
   router.post("/projects/:key/versions", requireRole(["owner"]), async (req, res) => {
     const body = versionSchema.parse(req.body); const created = await services.projects.createVersion({ projectKey: String(req.params.key), ...body, submittedBy: req.platformIdentity!.userId });
     res.status(201).json({ version: versionView(created.version), tools: created.tools, suspendedTools: created.suspendedTools });
+  });
+  router.patch("/versions/:id/tools/:toolId/module", requireRole(["owner"]), async (req, res) => {
+    const body = toolModuleSchema.parse(req.body);
+    res.json(await services.projects.setToolModule(String(req.params.id), String(req.params.toolId), req.platformIdentity!.userId, body.moduleKey));
   });
   router.patch("/projects/:key/trusted-review-bypass", requireRole(["operator"]), async (req, res) => {
     const body = bypassSchema.parse(req.body); res.json(await services.projects.setTrustedBypass(String(req.params.key), body.enabled));

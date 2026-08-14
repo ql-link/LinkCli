@@ -7,7 +7,7 @@
 | 来源 Issue | 无独立 Issue；来源为飞书 MCPSTAT-1 总览及 L1 接入层详情文档 |
 | 后续路径 | 契约验收（方案 → 验收契约 → 实现） |
 | 创建时间 | 2026-08-04 |
-| 最后更新 | 2026-08-04 |
+| 最后更新 | 2026-08-14 |
 | 当前状态 | 已冻结 |
 
 ## 第一部分 · 需求
@@ -286,6 +286,8 @@ erDiagram
 
 采用五张核心业务表：`mcp_projects` 保存稳定项目身份、发布指针和当前健康结论；`mcp_service_versions` 只保存不可变的服务版本与审核状态；`mcp_tool_versions` 保存每版工具定义；`mcp_reviews` 保存最终审核结论；`mcp_call_credentials` 保存调用凭据摘要。为了落实“只暂停发生高风险变化的工具”，额外增加一张最小运行辅助表 `mcp_tool_runtime`，它不保存工具定义，只保存项目内稳定工具名称的当前暂停状态。
 
+`mcp_tool_versions` 额外保存 `module_key`：登记或提交新版本时由项目负责人显式指定该工具所属的业务模块标识（例如“用户”“订单”），系统不从工具名猜测、也不用 Project 代替。这个字段本层自身不消费，只作为稳定事实供 L3 聚类使用；同一 `original_name` 在新版本中改变 `module_key` 视为正常的业务模块调整，不触发风险分类。
+
 字段遵循最小必要原则：审核状态只保存 `draft`、`pending_review`、`approved`、`rejected`；版本是否正在生效由项目的 `active_version_id` 推导，是否退役由其不再被生效指针引用推导，不重复落库。`submitted_at` 保存版本实际进入待审核或免审批准的时间，是计算七天审核滞留且无法由草稿创建时间可靠替代的业务事实。探活只持久化 `health_status` 和 `last_health_checked_at`，连续成功、失败次数由探活任务在运行时维护。凭据是否有效由 `revoked_at` 和 `expires_at` 推导，不再保存容易漂移的状态字段；最近使用时间从 L2 调用记录统计。
 
 项目状态取值为 `pending`、`active`、`disabled`、`retired`；健康状态取值为 `unknown`、`healthy`、`unhealthy`；工具运行状态取值为 `active`、`suspended`。主键继续使用应用生成的 UUID 字符串，时间统一按 UTC、微秒精度保存。标识字段使用大小写敏感排序规则，避免项目或工具名称被数据库错误合并。
@@ -345,12 +347,14 @@ CREATE TABLE mcp_tool_versions (
   id CHAR(36) NOT NULL COMMENT '工具版本主键 UUID',
   service_version_id CHAR(36) NOT NULL COMMENT '所属服务版本',
   original_name VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT '服务原始工具名',
+  module_key VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NULL COMMENT '登记时由项目负责人指定的业务模块标识，供 L3 聚类使用，不由系统猜测',
   description TEXT NOT NULL COMMENT '工具说明',
   input_schema JSON NOT NULL COMMENT '原始输入定义',
   output_schema JSON NULL COMMENT '原始输出定义',
   risk_level VARCHAR(16) NOT NULL DEFAULT 'low' COMMENT 'low/medium/high/incompatible',
   PRIMARY KEY (id),
   UNIQUE KEY uk_mcp_tool_versions_service_name (service_version_id, original_name),
+  KEY idx_mcp_tool_versions_module (service_version_id, module_key),
   CONSTRAINT ck_mcp_tool_versions_risk CHECK (risk_level IN ('low', 'medium', 'high', 'incompatible')),
   CONSTRAINT fk_mcp_tool_versions_service FOREIGN KEY (service_version_id) REFERENCES mcp_service_versions (id) ON UPDATE RESTRICT ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='每个服务版本的 MCP 工具定义';
@@ -408,7 +412,8 @@ CREATE TABLE mcp_call_credentials (
 | 接口 | 方法 | 变更 | 请求要点 | 响应要点 | 错误语义 | 权限 | 所属模块 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `/admin/projects` | POST | 新增 | 项目档案、标准 MCP 地址、项目凭据 | 草稿版本及发现的工具差异 | 地址不可达、协议不支持、名称冲突 | 项目负责人 | M1 |
-| `/admin/projects/{key}/versions` | POST | 新增 | 新地址或重新发现工具 | 候选版本、风险等级、差异摘要 | 重复定义、状态冲突 | 项目负责人 | M1 |
+| `/admin/projects/{key}/versions` | POST | 新增 | 新地址或重新发现工具；可为每个发现的工具附带 `module_key` | 候选版本、风险等级、差异摘要 | 重复定义、状态冲突 | 项目负责人 | M1 |
+| `/admin/versions/{id}/tools/{toolId}/module` | PATCH | 新增 | `module_key`（可为空表示清除） | 更新后的工具定义 | 版本非草稿状态不可修改 | 项目负责人 | M1 |
 | `/admin/versions/{id}/submit` | POST | 新增 | 版本号 | 待审核或待启用状态 | 定义不完整、状态冲突 | 项目负责人 | M1 |
 | `/admin/versions/{id}/review` | POST | 新增 | 批准或驳回、意见 | 审核结果和后续状态 | 重复审核、权限不足 | 审核人 | M1 |
 | `/admin/projects/{key}/status` | PATCH | 新增 | 启用、停用或下线动作 | 当前状态 | 非法流转 | 负责人或运营者 | M1 |
@@ -469,7 +474,7 @@ LinkCli/
 
 1. 建立配置校验、数据库连接和 SQL-first 基线（`src/config.ts`、`src/db/schema.sql`、`src/db/repository.ts`）。
 2. 实现标准 MCP 初始化与工具发现，并对定义做规范化哈希（`src/registry/discovery.ts`）。
-3. 实现不可变候选版本和项目内递增版本号（`src/registry/project-service.ts`）。
+3. 实现不可变候选版本和项目内递增版本号，接受并保存项目负责人为每个工具指定的 `module_key`（`src/registry/project-service.ts`）。
 4. 实现结构差异和风险分类，高风险变更产生暂停事件（`src/registry/risk-classifier.ts`）。
 5. 实现人工审核、可信项目免审策略和事务内原子发布（`src/registry/review-service.ts`）。
 6. 实现探活、熔断状态写入和恢复阈值（`src/registry/health-monitor.ts`）。
@@ -533,6 +538,7 @@ LinkCli/
 | D7 | 调用权限边界 | 第一阶段不做平台侧项目级或工具级授权；所有有效平台凭据可调用全部已发布、健康且未暂停的工具；项目 MCP 根据项目 Token 自行完成业务权限判断 | 1、4、5、8、10 | 用户确认 |
 | D8 | 调用重试策略 | 第一阶段不自动重试任何工具调用，不保存工具读写分类 | 1、7、9、10 | 用户确认按精简字段方案继续推进 |
 | D9 | 审核滞留计时 | 服务版本增加可空提交时间；进入待审核或免审批准时写入，草稿为空，七天告警只按该时间计算 | 5、7、9 | 实现审查发现创建时间不可替代后，用户确认增加字段并同步文档 |
+| D10 | 工具模块标识 | `mcp_tool_versions` 增加可空 `module_key`，登记或提交新版本时由项目负责人显式指定，系统不从工具名猜测、不用 Project 代替；本层不消费该字段，只作为稳定事实供 L3 聚类读取 | 7、8、9 | 用户确认，为 MCPSTAT-1-L3 的候选范围划分提供数据来源 |
 
 ### 13. 风险与依赖
 

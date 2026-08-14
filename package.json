@@ -5,9 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "concurrently -k -n api,web -c cyan,magenta \"npm:dev:api\" \"npm:dev:web\"",
-    "dev:api": "tsx watch src/main.ts",
+    "dev:api": "tsx --env-file=.env watch src/main.ts",
     "dev:web": "vite --config web/vite.config.ts",
-    "start": "node dist/main.js",
+    "start": "node --env-file-if-exists=.env dist/main.js",
     "build": "npm run build:api && npm run build:web",
     "build:api": "tsc -p tsconfig.build.json",
     "build:web": "vite build --config web/vite.config.ts",
@@ -19,12 +19,15 @@
     "typecheck:web": "tsc -p web/tsconfig.json --noEmit",
     "test": "vitest run",
     "test:mysql": "vitest run --no-file-parallelism tests/mysql-e2e.integration.test.ts tests/mysql-analysis.integration.test.ts",
+    "eval:l3": "tsx scripts/analysis/evaluate-l3-clustering.ts",
+    "eval:l3:codex-smoke": "tsx scripts/analysis/smoke-codex-cli-judge.ts",
     "check": "npm run typecheck && npm run typecheck:web && npm test && npm run build",
     "spec": "python3 scripts/spec/flow_guard.py"
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.3.0",
     "@gsap/react": "^2.1.2",
+    "@huggingface/transformers": "^3.8.1",
     "@modelcontextprotocol/sdk": "1.30.0",
     "@phosphor-icons/react": "^2.1.10",
     "@tanstack/react-query": "^5.90.20",

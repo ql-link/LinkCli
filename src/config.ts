@@ -26,7 +26,29 @@ const schema = z.object({
   L3_MINIMUM_SUCCESS_RATE: z.coerce.number().min(0).max(1).default(0.9),
   L3_MINIMUM_COVERAGE_GAPS: z.coerce.number().int().positive().default(5),
   L3_MINIMUM_COVERAGE_GAP_RATIO: z.coerce.number().min(0).max(1).default(0.2),
-  L3_JOIN_SIMILARITY: z.coerce.number().min(0).max(1).default(0.82),
+  L3_RECALL_TOP_K: z.coerce.number().int().min(1).max(20).default(5),
+  L3_REPRESENTATIVE_QUERY_LIMIT: z.coerce.number().int().min(1).max(10).default(3),
+  L3_MINIMUM_RECALL_SIMILARITY: z.coerce.number().min(-1).max(1).default(0),
+  L3_MINIMUM_REBUILD_MEMBERS: z.coerce.number().int().positive().default(3),
+  L3_REBUILD_INTERVAL_MS: z.coerce.number().int().min(1_000).default(1_800_000),
+  L3_CANDIDATE_HANDOFF_ENABLED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
+  L3_EMBEDDING_ENDPOINT: z.string().url().optional(),
+  L3_EMBEDDING_API_KEY: z.string().optional(),
+  L3_EMBEDDING_MODEL: z.string().optional(),
+  L3_EMBEDDING_DIMENSIONS: z.coerce.number().int().positive().optional(),
+  L3_LOCAL_EMBEDDING_MODEL: z.string().optional(),
+  L3_LOCAL_EMBEDDING_DIMENSIONS: z.coerce.number().int().positive().optional(),
+  L3_LOCAL_EMBEDDING_DTYPE: z.enum(["auto","fp32","fp16","q8","int8","uint8","q4","bnb4","q4f16"]).default("q8"),
+  L3_LOCAL_EMBEDDING_CACHE_DIR: z.string().optional(),
+  L3_LOCAL_EMBEDDING_LOCAL_FILES_ONLY: z.enum(["true", "false"]).default("true").transform((value) => value === "true"),
+  L3_JUDGE_PROVIDER: z.enum(["shadow","remote","codex-cli"]).default("shadow"),
+  L3_LLM_ENDPOINT: z.string().url().optional(),
+  L3_LLM_API_KEY: z.string().min(1).optional(),
+  L3_LLM_MODEL: z.string().min(1).optional(),
+  L3_CODEX_CLI_COMMAND: z.string().min(1).default("codex"),
+  L3_CODEX_CLI_MODEL: z.string().min(1).default("gpt-5.3-codex-spark"),
+  L3_CODEX_CLI_REASONING_EFFORT: z.enum(["low","medium","high","xhigh"]).default("medium"),
+  L3_CODEX_CLI_TIMEOUT_MS: z.coerce.number().int().min(1_000).default(60_000),
   COLLECTION_IDLE_TIMEOUT_MS: z.coerce.number().int().positive().default(300_000),
   COLLECTION_GRACE_PERIOD_MS: z.coerce.number().int().positive().default(60_000),
   COLLECTION_LATE_REVISION_MS: z.coerce.number().int().positive().default(86_400_000),
@@ -68,6 +90,34 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
   }
   if (["0.0.0.0", "::"].includes(parsed.data.HOST) && !parsed.data.MCP_ALLOWED_HOSTS?.length) {
     throw new Error("Invalid configuration: MCP_ALLOWED_HOSTS is required when HOST binds to all interfaces");
+  }
+  const remoteEmbeddingSettings = [parsed.data.L3_EMBEDDING_ENDPOINT,parsed.data.L3_EMBEDDING_API_KEY,parsed.data.L3_EMBEDDING_MODEL,parsed.data.L3_EMBEDDING_DIMENSIONS];
+  const configuredRemoteSettings = remoteEmbeddingSettings.filter((value) => value !== undefined).length;
+  if (configuredRemoteSettings > 0 && configuredRemoteSettings < remoteEmbeddingSettings.length) {
+    throw new Error("Invalid configuration: L3_EMBEDDING_ENDPOINT, L3_EMBEDDING_API_KEY, L3_EMBEDDING_MODEL and L3_EMBEDDING_DIMENSIONS must be configured together");
+  }
+  const localEmbeddingSettings = [parsed.data.L3_LOCAL_EMBEDDING_MODEL,parsed.data.L3_LOCAL_EMBEDDING_DIMENSIONS];
+  const configuredLocalSettings = localEmbeddingSettings.filter((value) => value !== undefined).length;
+  if (configuredLocalSettings > 0 && configuredLocalSettings < localEmbeddingSettings.length) {
+    throw new Error("Invalid configuration: L3_LOCAL_EMBEDDING_MODEL and L3_LOCAL_EMBEDDING_DIMENSIONS must be configured together");
+  }
+  const hasRemoteEmbedding = configuredRemoteSettings === remoteEmbeddingSettings.length;
+  const hasLocalEmbedding = configuredLocalSettings === localEmbeddingSettings.length;
+  if (hasRemoteEmbedding && hasLocalEmbedding) {
+    throw new Error("Invalid configuration: configure either remote or local L3 embedding, not both");
+  }
+  const llmSettings = [parsed.data.L3_LLM_ENDPOINT,parsed.data.L3_LLM_API_KEY,parsed.data.L3_LLM_MODEL];
+  const configuredLlmSettings = llmSettings.filter((value) => value !== undefined).length;
+  if (configuredLlmSettings > 0 && configuredLlmSettings < llmSettings.length) {
+    throw new Error("Invalid configuration: L3_LLM_ENDPOINT, L3_LLM_API_KEY and L3_LLM_MODEL must be configured together");
+  }
+  const hasLlmJudge = configuredLlmSettings === llmSettings.length;
+  if(parsed.data.L3_JUDGE_PROVIDER==="remote"&&!hasLlmJudge){
+    throw new Error("Invalid configuration: remote L3 judge requires L3_LLM_ENDPOINT, L3_LLM_API_KEY and L3_LLM_MODEL");
+  }
+  const hasConfiguredJudge=parsed.data.L3_JUDGE_PROVIDER==="codex-cli"||(parsed.data.L3_JUDGE_PROVIDER==="remote"&&hasLlmJudge);
+  if (parsed.data.L3_CANDIDATE_HANDOFF_ENABLED && ((!hasRemoteEmbedding && !hasLocalEmbedding) || !hasConfiguredJudge)) {
+    throw new Error("Invalid configuration: L3 candidate handoff requires complete embedding and LLM judge configurations");
   }
   return parsed.data;
 }

@@ -1,12 +1,23 @@
 import { createHash } from "node:crypto";
 import type { AnalysisCall } from "./types.js";
 
-const actionWords = /(?:查询|查找|查阅|获取|读取|查看|检索|修改|更新|编辑|变更|删除|移除|取消|新增|创建|添加|新建|query|search|find|fetch|get|read|list|update|edit|change|delete|remove|cancel|create|add)/giu;
-const fillerWords = /(?:请|帮我|一下|然后|之后|以后|并且|同时|需要|想要|the|a|an|please|then|and|after)/giu;
 const identifierLike = /\b(?:[0-9a-f]{8}-[0-9a-f-]{27,}|\d{4,}|[a-z]+[-_]\d+)\b/giu;
 
+/**
+ * 无损规范化：只做 Unicode 规范化、大小写统一和空白折叠，不删除或替换任何词——
+ * 包括动作词、填充词。这些词是语义模型判断意图所需的信息，动作词只在 sceneOf 里被
+ * 识别为场景标签，不在这里被抹除（MCPSTAT-1-L3 §6.3“规范化边界”）。
+ */
 export function normalizeQuery(query: string): string {
-  return query.normalize("NFKC").toLocaleLowerCase().replace(identifierLike, " ").replace(actionWords, " ").replace(fillerWords, " ").replace(/[\p{P}\p{S}\s]+/gu, "").trim();
+  return query.normalize("NFKC").toLocaleLowerCase().replace(/\s+/gu, " ").trim();
+}
+
+/**
+ * 指纹专用文本：在规范化基础上额外去掉明显的参数型标识符和标点，用于识别“完全相同或仅参数不同”的
+ * Query（§6.3 第一步）。这份更激进的清洗只喂给指纹哈希，不用于喂给语义模型的比较文本。
+ */
+function fingerprintText(query: string): string {
+  return normalizeQuery(query).replace(identifierLike, " ").replace(/[\p{P}\p{S}\s]+/gu, "").trim();
 }
 
 export function sha256(value: string): string {
@@ -14,23 +25,23 @@ export function sha256(value: string): string {
 }
 
 export function queryFingerprint(query: string): string {
-  return sha256(normalizeQuery(query));
+  return sha256(fingerprintText(query));
 }
 
-function features(value: string): Set<string> {
-  const normalized = normalizeQuery(value);
-  if (normalized.length < 2) return new Set(normalized ? [normalized] : []);
-  const chars = [...normalized];
-  return new Set(chars.slice(0, -1).map((char, index) => `${char}${chars[index + 1]}`));
+export function cosineSimilarity(a: readonly number[], b: readonly number[]): number {
+  if (a.length !== b.length || a.length === 0) return 0;
+  let dot = 0; let normA = 0; let normB = 0;
+  for (let i = 0; i < a.length; i += 1) { const x = a[i] ?? 0; const y = b[i] ?? 0; dot += x * y; normA += x * x; normB += y * y; }
+  if (normA === 0 || normB === 0) return 0;
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-export function querySimilarity(left: string, right: string): number {
-  const a = features(left); const b = features(right);
-  if (a.size === 0 && b.size === 0) return 1;
-  if (a.size === 0 || b.size === 0) return 0;
-  let intersection = 0;
-  for (const item of a) if (b.has(item)) intersection += 1;
-  return intersection / (a.size + b.size - intersection);
+export function averageVector(vectors: readonly (readonly number[])[]): number[] {
+  if (vectors.length === 0) return [];
+  const dim = vectors[0]?.length ?? 0;
+  const sum = new Array<number>(dim).fill(0);
+  for (const vector of vectors) for (let i = 0; i < dim; i += 1) sum[i] = (sum[i] ?? 0) + (vector[i] ?? 0);
+  return sum.map((value) => value / vectors.length);
 }
 
 export function modulePathOf(calls: AnalysisCall[]): { projectScope: string | null; modulePath: string[] | null; modulePathHash: string | null } {

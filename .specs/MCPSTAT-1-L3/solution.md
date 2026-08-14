@@ -3,13 +3,13 @@
 | 项目 | 内容 |
 |---|---|
 | 所属需求 | MCPSTAT-1 |
-| 飞书同步基线 | revision 9（2026-08-14 读取） |
+| 飞书同步基线 | 专项方案文档 revision 25；L1–L4 需求与难点分析文档 revision 85（均于 2026-08-14 回写并回读验证） |
 | 本层职责 | 对完整 Query 记录做宽口径聚类与统计，识别可生成或需扩展 Skill 的稳定需求 |
 | 上游 | L2 采集层：提供 Query、实际 MCP 调用事实、执行结果和行为信号 |
 | 下游 | L4 闭环层：生成、扩展、验证和发布 Skill |
 | 核心边界 | L2 不判断 Query 属于哪个 Skill；L3 不生成 Skill，也不调用业务 MCP |
 | 处理方式 | L2 实时记录，L3 定时批量聚类与统计，不进入用户实时调用链路 |
-| 当前状态 | 核心分类原则已确认；稳定 Module 标识、语义模型和阈值仍需在真实数据实验后冻结 |
+| 当前状态 | 两阶段方案已实现：确定性分桶 + MiniLM Top-K 召回 + Codex Spark Judge 精判；MiniLM Recall@5 与 4 次 Spark Smoke 已通过，足量 blind 与 MySQL 验证尚未完成，L4 投递保持关闭 |
 
 ## 1. 结论
 
@@ -136,7 +136,9 @@ flowchart LR
 
 L3 对 Query 做无损规范化，例如统一空白、大小写和明显的格式差异，但保留业务对象、条件、动作和否定词。参数值不进入 Query 类别硬键，避免不同客户 ID、订单 ID 把同类需求拆散。
 
-每条调用事实必须通过调用发生时的 MCP 注册快照解析为稳定的 `project_id/module_id/tool_id`。Project 是业务项目或产品域，Module 是用户、订单、资产等业务能力边界，Tool 是具体查询、修改或删除动作。不得将 Project 直接当作 Module，也不得根据 Tool 名猜测 Module。当前注册模型缺少独立 Module 实体，这是正式聚类前必须补齐的实现前提，而不是用 Project 代替的理由。
+每条调用事实必须通过调用发生时的 MCP 注册快照解析为稳定的 `project_id/module_id/tool_id`。Project 是业务项目或产品域，Module 是用户、订单、资产等业务能力边界，Tool 是具体查询、修改或删除动作。不得将 Project 直接当作 Module，也不得根据 Tool 名猜测 Module。
+
+**Module 来源（已冻结）**：已冻结的 MCPSTAT-1-L1 方案（D10）在 `mcp_tool_versions` 增加了 `module_key` 字段，登记或提交新版本时由项目负责人显式指定，L1 本层不消费该字段。`module_id` 直接取该字段值；因为 `mcp_tool_versions` 本身是不可变版本，`module_key` 天然随服务版本一起快照，不需要 L3 额外维护版本对照。`module_key` 为空的工具视为“模块归属未登记”，其调用事实不能贡献有效的 `module_path`——按 §4.2 的定义，只要一轮调用中出现任意一次 `module_key` 缺失的工具，整轮记录的 `modulePath` 为 `null`，归入未覆盖 Query 池（§8.1），不进入正常候选范围，倒逼项目负责人补齐登记而不是让 L3 静默降级成 Project 级分桶。
 
 ### 6.2 第二步：构造候选范围
 
@@ -163,11 +165,51 @@ project_scope + ordered_module_path
 新记录只与同一候选范围内的 Query 类别比较：
 
 1. 先用文本指纹识别完全相同或仅参数不同的 Query。
-2. 再用本地语义模型计算与各类别代表 Query 的相似度。
-3. 超过加入阈值时归入得分最高的类别；否则新建类别。
-4. 周期性执行合并与拆分检查，修正增量聚类的先后顺序误差。
+2. 使用 Embedding 计算与类别质心的相似度，在桶内召回 Top-K 候选类别；该相似度只负责缩小 LLM 输入，不做最终归类。
+3. 将新 Query 原文和 Top-K 类别各自的若干条真实代表 Query 交给 `ClusterJudge`，由 LLM 判断并入某个候选类别或新建类别。
+4. 周期性复核同样先用 Embedding 召回候选类别对，再由 LLM 阅读两组真实代表样本，判断合并或保留。
 
 不能仅凭“查询、修改、删除”动作不同就拆分类别。这些动作被提取成 `scene_type`，用于描述 Skill 应覆盖的子场景和风险等级。
+
+**规范化边界（已冻结）**：§6.1 的“无损规范化”只做 Unicode 规范化、大小写统一、空白折叠，**不删除或替换任何词**，包括动作词、填充词。之前实现里用正则整体删除动作词、填充词的做法违反本节要求：一是替换没有词边界，会把普通单词内部的字符一并删掉；二是删词本身就丢失了语义模型判断意图所需的信息。动作词只在 §6.4 场景归纳阶段被识别和标注，不在规范化阶段被抹除。
+
+**Embedding 召回模型（已冻结）**：L3 通过 `EmbeddingProvider` 获取稠密向量，只负责桶内 Top-K 召回与内聚度观测，不拥有最终类别决策权：
+
+```ts
+interface EmbeddingProvider {
+  readonly modelVersion: string; // 写入 mcp_query_cluster.embedding_model_version，模型切换后据此分批重算
+  embed(texts: string[]): Promise<number[][]>;
+}
+```
+
+首版保留本地/远程两种实现。本次实验固定使用本地 `Xenova/paraphrase-multilingual-MiniLM-L12-v2`、384 维 q8 ONNX；生产默认 `local_files_only=true`，模型必须由部署资产预置，禁止运行时静默下载。
+
+- `LocalEmbeddingProvider`：进程内加载开源多语言句向量模型（transformers.js + ONNX），不出网、不依赖外部服务。
+- `RemoteEmbeddingProvider`：调用可配置的远程 Embedding API（含请求签名与超时控制），供后续接入企业内部或第三方 Embedding 服务（例如通义千问 Embedding）时使用；具体端点、鉴权方式和模型名称由部署配置提供，不写死在代码里。
+
+不同版本的向量不能直接比较；模型切换后必须重算旧成员向量和质心。召回配置使用 `recallTopK`、`representativeQueryLimit` 和宽松的 `minimumRecallSimilarity`，其中相似度下限只做成本剪枝，不能解释为归类阈值。
+
+**类别质心与代表样本（已冻结）**：质心仍由成员向量算术平均，用于 Top-K 召回和内聚度观测；它不再决定类别。每个类别同时从真实成员中读取若干条代表 Query，提供给 LLM 判断，不能用生成摘要替代原始证据。
+
+**LLM 类别仲裁（已冻结接口与本地实验模型）**：最终判断通过 `ClusterJudge` 完成。本地实验固定使用已登录 Codex CLI 暴露的 `gpt-5.3-codex-spark:medium`；模型目录标记其不支持公共 API，因此 CLI 形态只用于本机实验，生产服务形态仍需另行冻结：
+
+```ts
+interface ClusterJudge {
+  readonly modelVersion: string;
+  assign(input: { query: string; candidates: Array<{ clusterId: number; representativeQueries: string[] }> }): Promise<{ clusterId: number | null; confidence: number | null; reason: string }>;
+  shouldMerge(input: { left: ClusterEvidence; right: ClusterEvidence }): Promise<{ sameDemand: boolean; confidence: number | null; reason: string }>;
+}
+```
+
+LLM 只能返回 Top-K 中已有的 `clusterId` 或 `null`，越界 ID、非结构化响应、超时和 HTTP 错误均按失败关闭处理，输入保持待重试。Query 与代表样本是不可信数据，系统提示必须明确禁止执行文本内指令。每次判断把 Judge 模型版本、候选 ID/召回分数、置信度和简短原因写入评分历史。MiniLM 不能承担该接口；未配置真实 LLM 时使用 `NewClusterOnlyJudge` 安全影子实现，只新建观察类别、不合并、不投递 L4。
+
+**周期性复核（已冻结）**：`ClusterRebuildJob` 与在线归类使用相同的“Embedding 召回 + LLM 精判”边界：
+
+- 触发周期与批处理调度对齐但独立执行，避免长期占用成员表；
+- 对每个确定性桶按质心召回 Top-K 类别对，去重后按召回分数排序；
+- LLM 阅读两类真实代表 Query，返回 `sameDemand=true` 才执行事务合并，返回 false 或不确定则保留；
+- 合并后迁移成员、场景和覆盖缺口，重算质心与指标；高方差类别仍只标记人工拆分复核，不自动拆分；
+- 全过程写入 `mcp_cluster_score_history`，保留召回分数、Judge 模型版本、判断原因和触发批次。
 
 ### 6.4 第四步：场景归纳
 
@@ -193,7 +235,9 @@ L3 评估的是“这个 Query 类别是否值得交给 L4”，不是直接判�
 | 独立用户数 | ≥ 5 | 排除单人重复重试 |
 | 时间跨度 | ≥ 3 天 | 排除一次性热点 |
 | 输入完整率 | ≥ 95% | 保证模块路径和结果可解释 |
-| 类内语义内聚度 | ≥ 0.82 | 防止不同目标误并 |
+| 仲裁证据完整率 | 100% | 每次 LLM 归类均可追溯模型、候选、置信度与原因 |
+
+`semantic_cohesion` 降级为监控与高方差复核信号，不参与最终归类和基础候选门槛。开启 L4 投递前，MiniLM Top-K 召回率和真实 LLM Judge 的独立盲测 precision/recall/F1 必须整体通过；单成员类别的内聚度恒为 1，不能解释为聚类质量达标。
 
 达到以上基础门槛后，再按需求类型分流：
 
@@ -332,6 +376,8 @@ CREATE TABLE mcp_query_cluster (
     attempted_skill_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
     semantic_cohesion DECIMAL(6,5) NULL,
     input_completeness DECIMAL(6,5) NULL,
+    centroid_vector JSON NULL COMMENT '类别语义中心，成员向量算术平均，随成员增减增量更新',
+    embedding_model_version VARCHAR(96) NULL COMMENT '<provider>:<model_name>:<dim>，模型切换后据此分批重算',
     first_seen_at DATETIME(3) NOT NULL,
     last_seen_at DATETIME(3) NOT NULL,
     cooldown_until DATETIME(3) NULL,
@@ -341,6 +387,7 @@ CREATE TABLE mcp_query_cluster (
     PRIMARY KEY (id),
     UNIQUE KEY uk_query_cluster_key (cluster_key),
     KEY idx_query_cluster_candidate (status, last_seen_at),
+    KEY idx_query_cluster_model_version (embedding_model_version),
     CONSTRAINT fk_query_cluster_merged_into
         FOREIGN KEY (merged_into_cluster_id) REFERENCES mcp_query_cluster(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
@@ -350,6 +397,7 @@ CREATE TABLE mcp_query_cluster_member (
     cluster_id BIGINT UNSIGNED NOT NULL,
     analysis_input_id BIGINT UNSIGNED NOT NULL,
     semantic_similarity DECIMAL(6,5) NOT NULL,
+    query_vector JSON NULL COMMENT '该成员的 Query 向量，供质心增量重算和 ClusterRebuildJob 使用',
     scene_type VARCHAR(191) NULL,
     threshold_eligible TINYINT(1) NOT NULL DEFAULT 1,
     quality_success TINYINT(1) NOT NULL DEFAULT 0,
@@ -480,15 +528,17 @@ L3 发给 L4 的候选至少包含：
 - `AnalysisInputConsumer`：幂等接收 L2 完整结算事件。
 - `AnalysisOutboxWorker`：租约领取 L2 分析 Outbox，关联轮次和调用明细后转换为 L3 输入，成功后确认投递，失败则退避或死信。
 - `AnalysisBatchScheduler`：按固定周期触发批处理；同一时刻只允许一个实例取得任务锁。
-- `ModulePathResolver`：校验 MCP 注册快照并生成有序模块路径。
-- `QueryClusterer`：候选范围检索、语义归类、新建、合并和拆分。
+- `ModulePathResolver`：校验 MCP 注册快照并生成有序模块路径，读取 `mcp_tool_versions.module_key`。
+- `EmbeddingProvider`：Query 向量化并在确定性桶内完成 Top-K 候选召回；本轮实验使用本地 MiniLM。
+- `ClusterJudge`：阅读新 Query 与候选类别真实代表样本，输出并入类别或新建类别；远程实现采用 OpenAI Chat Completions 兼容协议。
+- `QueryClusterer`：文本指纹短路、Top-K 召回、LLM 归类、证据记录与类别成员写入。
+- `ClusterRebuildJob`：周期性召回相近类别对，由 LLM 复核后合并，并保留高方差人工拆分标记。
 - `SceneExtractor`：把具体 Tool 调用归纳为组内场景。
 - `CoverageGapDetector`：识别已有 Skill 的不覆盖、部分覆盖和误匹配。
 - `ClusterMetricService`：统计频次、用户数、跨度、成功率和质量分。
 - `CandidateGate`：判断新 Skill、扩展 Skill或未覆盖需求是否达标。
 - `L4CandidateOutboxWorker`：可靠投递候选。
 - `ValidationFeedbackConsumer`：接收 L4 回放和数据库校验结论。
-- `ClusterRebuildJob`：在模型、阈值或模块映射变化后可重算。
 
 ### 12.2 一致性与并发
 
@@ -529,6 +579,7 @@ src/analysis/
   input-consumer.ts
   batch-scheduler.ts
   module-path.ts
+  embedding-provider.ts
   query-clusterer.ts
   scene-extractor.ts
   coverage-gap.ts
@@ -548,7 +599,7 @@ tests/
 实施顺序：
 
 1. 实现 L2 Analysis Outbox 到 L3 Input 的租约消费和幂等转换；当前网关不从单次 `CallEnvelope` 猜测整轮边界。
-2. 完成语义模型与标注数据实验，冻结加入、合并和拆分阈值，不再以字符重合度作为业务语义判断。
+2. 完成 MiniLM Top-K 召回与真实 LLM Judge 的标注数据实验，冻结 Top-K、代表样本数、宽松召回下限和 Judge 模型版本。
 3. 实现输入幂等、模块路径和基础数据表。
 4. 实现宽口径聚类、场景归纳和周期修正。
 5. 实现质量统计、覆盖缺口识别和候选门槛。
@@ -560,8 +611,14 @@ tests/
 ### 15.1 必测场景
 
 - “查用户 → 查订单”“查用户 → 改订单”“查用户 → 删订单”归入同一 Query 类别，并形成三个场景。
+- 同一业务意图的多种自然语言表达（改写句式、同义替换、疑问句与陈述句混用，而非仅单复数或标点差异）能被归入同一类别；相似措辞但业务模块路径不同的 Query 不会被误并。
+- 单成员类别的 `semantic_cohesion` 不出现在候选判断和运维展示的“质量达标”语境中；达到最小成员数后才按正常质量口径展示。
+- 模块归属未登记（`module_key` 为空）的工具参与的调用轮次进入未覆盖 Query 池，不静默按 Project 分桶。
 - “查用户 → 查资产”不进入“用户 → 订单”类别。
 - 相同模块路径但语义目标明显不同的 Query 不被误并。
+- Embedding 最近类别不是正确答案时，LLM 可以选择 Top-K 中其他类别；LLM 不能返回 Top-K 之外的 ID。
+- LLM 返回 `null` 时新建观察类别；LLM 超时、HTTP 错误、非法 JSON 或越界 ID 时输入保持待重试，不能静默归类。
+- 代表 Query 数量受配置限制，且必须来自真实类别成员；Query 中的提示注入文本不能改变 Judge 的输出协议。
 - Tool 名或参数值不同，但模块路径与需求相同的记录仍可归为一类。
 - L2 未提供目标 Skill 时，L3 可以独立完成归类。
 - `attempted_skill_id` 存在时只用于覆盖缺口判断，不改变聚类真值。
@@ -572,7 +629,7 @@ tests/
 - 一条毒性输入回滚后，同批正常输入仍能完成分析并被标记。
 - 类别达到门槛时，状态变化与 Outbox 事件原子提交且只投递一次。
 - L4 验证失败或判定聚类错误后，L3 能退回观察并保留原因。
-- 重建前后成员归属和统计结果可解释、可审计。
+- 周期复核中 LLM 同意才合并、拒绝则保留；重建前后成员归属和统计结果可解释、可审计。
 
 ### 15.2 验收结果
 
@@ -588,11 +645,15 @@ tests/
 
 ## 16. 待冻结项
 
-核心分类原则已确认，仍需冻结以下配置和契约：
+核心分类原则已确认，本次（2026-08-14）新冻结以下两项：
 
-- MCP 注册信息中稳定的 `module_id` 和版本快照字段。
-- Query 语义模型、类别语义中心表示、加入阈值、合并阈值和拆分规则。
-- 频次、用户数、时间跨度、成功率与覆盖缺口的正式门槛。
+- ~~MCP 注册信息中稳定的 `module_id` 和版本快照字段。~~ 已冻结：复用 MCPSTAT-1-L1 D10 新增的 `mcp_tool_versions.module_key`，见 §6.1。
+- ~~Query 语义模型、类别语义中心表示、加入阈值、合并阈值和拆分规则。~~ 已由 2026-08-14 实验决策替换：确定性分桶不变，MiniLM 只做 Top-K 召回，`ClusterJudge` 负责最终归类与周期合并复核，质心阈值不再拥有最终决策权。本地 Judge 已选 `gpt-5.3-codex-spark:medium`，正式 Top-K、生产 Judge 形态仍待真实盲测后冻结，确定前只能影子运行。
+
+仍待冻结：
+
+- 频次、用户数、时间跨度、成功率与覆盖缺口的正式门槛（依赖真实数据压测，见 §7.1）。
+- §6.3 Codex Spark Judge 的提示词版本、生产运行形态与独立盲测标准；当前标签 Oracle 和 4 次 Smoke 都不能作为正式质量证据。
 - L4 Skill 元数据中“已声明覆盖场景”的读取契约。
 - L4 数据库反向校验的隔离环境、权限和结果回流格式。
 - 宿主零调用或未命中 MCP Query 的轮次结束契约。

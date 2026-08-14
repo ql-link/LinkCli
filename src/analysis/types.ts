@@ -45,6 +45,7 @@ export interface QueryCluster {
   representativeEventId: string;
   representativeQuery: string;
   status: ClusterStatus;
+  mergedIntoClusterId: number | null;
   sampleCount: number;
   distinctActorCount: number;
   successCount: number;
@@ -52,6 +53,10 @@ export interface QueryCluster {
   attemptedSkillCount: number;
   semanticCohesion: number;
   inputCompleteness: number;
+  /** 类别语义中心：成员向量算术平均，决定聚类判断；representativeQuery 只做展示，两者不互相替代 */
+  centroidVector: number[] | null;
+  /** `<provider>:<model_name>:<dim>`，模型切换后据此分批重算 */
+  embeddingModelVersion: string | null;
   firstSeenAt: Date;
   lastSeenAt: Date;
   version: number;
@@ -61,6 +66,8 @@ export interface ClusterMember {
   clusterId: number;
   analysisInputId: number;
   semanticSimilarity: number;
+  /** 该成员的 Query 向量，供质心增量重算和 ClusterRebuildJob 使用 */
+  queryVector: number[] | null;
   sceneType: string | null;
   thresholdEligible: boolean;
   qualitySuccess: boolean;
@@ -103,7 +110,17 @@ export interface ClusterThresholds {
   minimumSuccessRate: number;
   minimumCoverageGapCount: number;
   minimumCoverageGapRatio: number;
-  joinSimilarity: number;
+  /** 高方差复核所需的最小成员数。归类和合并由 ClusterJudge 决定，不再使用 cosine 硬阈值。 */
+  minimumRebuildMembers: number;
+}
+
+export interface ClusterDecisionSettings {
+  /** Embedding 在同一确定性桶内召回给 LLM 的候选类别数。 */
+  recallTopK: number;
+  /** 每个候选类别提供给 LLM 的真实代表 Query 数。 */
+  representativeQueryLimit: number;
+  /** 只用于召回剪枝，不是最终归类或合并阈值。 */
+  minimumRecallSimilarity: number;
 }
 
 export const defaultClusterThresholds: ClusterThresholds = {
@@ -115,7 +132,13 @@ export const defaultClusterThresholds: ClusterThresholds = {
   minimumSuccessRate: 0.9,
   minimumCoverageGapCount: 5,
   minimumCoverageGapRatio: 0.2,
-  joinSimilarity: 0.82,
+  minimumRebuildMembers: 3,
+};
+
+export const defaultClusterDecisionSettings: ClusterDecisionSettings = {
+  recallTopK: 5,
+  representativeQueryLimit: 3,
+  minimumRecallSimilarity: 0,
 };
 
 export interface SkillCoverageResult {

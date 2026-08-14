@@ -25,6 +25,7 @@ export interface RegistryRepository {
   getVersionForUpdate(id: string): Promise<ServiceVersion | null>;
   listVersions(projectId: string): Promise<ServiceVersion[]>;
   listTools(versionId: string): Promise<ToolVersion[]>;
+  updateToolModule(toolId: string, moduleKey: string | null): Promise<ToolVersion | null>;
   createReview(review: Review): Promise<boolean>;
   getReview(versionId: string): Promise<Review | null>;
   upsertToolRuntime(runtime: ToolRuntime): Promise<void>;
@@ -102,6 +103,13 @@ export class MemoryRegistryRepository implements RegistryRepository {
     return clone([...this.versions.values()].filter((item) => item.projectId === projectId).sort((a, b) => a.versionNo - b.versionNo));
   }
   async listTools(versionId: string): Promise<ToolVersion[]> { return clone(this.tools.get(versionId) ?? []); }
+  async updateToolModule(toolId: string, moduleKey: string | null): Promise<ToolVersion | null> {
+    for (const list of this.tools.values()) {
+      const tool = list.find((item) => item.id === toolId);
+      if (tool) { tool.moduleKey = moduleKey; return clone(tool); }
+    }
+    return null;
+  }
   async createReview(review: Review): Promise<boolean> {
     if (this.reviews.has(review.serviceVersionId)) return false;
     this.reviews.set(review.serviceVersionId, clone(review));
@@ -164,7 +172,7 @@ function versionFrom(row: RowDataPacket): ServiceVersion {
     definitionHash: Buffer.from(row.definition_hash), submittedBy: row.submitted_by, submittedAt: nullableDate(row.submitted_at), createdAt: date(row.created_at) };
 }
 function toolFrom(row: RowDataPacket): ToolVersion {
-  return { id: row.id, serviceVersionId: row.service_version_id, originalName: row.original_name, description: row.description,
+  return { id: row.id, serviceVersionId: row.service_version_id, originalName: row.original_name, moduleKey: row.module_key ?? null, description: row.description,
     inputSchema: typeof row.input_schema === "string" ? JSON.parse(row.input_schema) : row.input_schema,
     outputSchema: row.output_schema === null ? null : typeof row.output_schema === "string" ? JSON.parse(row.output_schema) : row.output_schema,
     riskLevel: row.risk_level };
@@ -212,8 +220,13 @@ export class MySqlRegistryRepository implements RegistryRepository {
   async createVersion(v: ServiceVersion, tools: ToolVersion[]): Promise<void> {
     await this.executor.execute("INSERT INTO mcp_service_versions (id,project_id,version_no,endpoint,protocol_version,credential_ciphertext,credential_key_id,review_status,risk_level,definition_hash,submitted_by,submitted_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
       [v.id,v.projectId,v.versionNo,v.endpoint,v.protocolVersion,v.credentialCiphertext,v.credentialKeyId,v.reviewStatus,v.riskLevel,v.definitionHash,v.submittedBy,v.submittedAt,v.createdAt]);
-    for (const t of tools) await this.executor.execute("INSERT INTO mcp_tool_versions (id,service_version_id,original_name,description,input_schema,output_schema,risk_level) VALUES (?,?,?,?,?,?,?)",
-      [t.id,t.serviceVersionId,t.originalName,t.description,JSON.stringify(t.inputSchema),t.outputSchema ? JSON.stringify(t.outputSchema) : null,t.riskLevel]);
+    for (const t of tools) await this.executor.execute("INSERT INTO mcp_tool_versions (id,service_version_id,original_name,module_key,description,input_schema,output_schema,risk_level) VALUES (?,?,?,?,?,?,?,?)",
+      [t.id,t.serviceVersionId,t.originalName,t.moduleKey,t.description,JSON.stringify(t.inputSchema),t.outputSchema ? JSON.stringify(t.outputSchema) : null,t.riskLevel]);
+  }
+  async updateToolModule(toolId: string, moduleKey: string | null): Promise<ToolVersion | null> {
+    await this.executor.execute("UPDATE mcp_tool_versions SET module_key=? WHERE id=?", [moduleKey, toolId]);
+    const [rows] = await this.executor.query<RowDataPacket[]>("SELECT * FROM mcp_tool_versions WHERE id=?", [toolId]);
+    return rows[0] ? toolFrom(rows[0]) : null;
   }
   async updateVersion(v: ServiceVersion): Promise<void> { await this.executor.execute("UPDATE mcp_service_versions SET review_status=?,submitted_at=? WHERE id=?",[v.reviewStatus,v.submittedAt,v.id]); }
   async getVersion(id: string): Promise<ServiceVersion | null> { const [rows] = await this.executor.query<RowDataPacket[]>("SELECT * FROM mcp_service_versions WHERE id=?",[id]); return rows[0] ? versionFrom(rows[0]) : null; }
