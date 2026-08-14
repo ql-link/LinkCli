@@ -40,7 +40,7 @@ export function averageVector(vectors: readonly (readonly number[])[]): number[]
   if (vectors.length === 0) return [];
   const dim = vectors[0]?.length ?? 0;
   const sum = new Array<number>(dim).fill(0);
-  for (const vector of vectors) for (let i = 0; i < dim; i += 1) sum[i] += vector[i] ?? 0;
+  for (const vector of vectors) for (let i = 0; i < dim; i += 1) sum[i] = (sum[i] ?? 0) + (vector[i] ?? 0);
   return sum.map((value) => value / vectors.length);
 }
 

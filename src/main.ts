@@ -1,7 +1,8 @@
 import { createPool } from "mysql2/promise";
 import { AnalysisBatchScheduler } from "./analysis/batch-scheduler.js";
 import { AnalysisBatchService } from "./analysis/batch-service.js";
-import { DeterministicFallbackEmbeddingProvider, RemoteEmbeddingProvider, type EmbeddingProvider } from "./analysis/embedding-provider.js";
+import { DeterministicFallbackEmbeddingProvider, LocalEmbeddingProvider, RemoteEmbeddingProvider, type EmbeddingProvider } from "./analysis/embedding-provider.js";
+import { CodexCliClusterJudge, NewClusterOnlyJudge, RemoteLlmClusterJudge, type ClusterJudge } from "./analysis/cluster-judge.js";
 import { AnalysisInputConsumer } from "./analysis/input-consumer.js";
 import { AnalysisOutboxWorker } from "./analysis/outbox-worker.js";
 import { MySqlAnalysisRepository } from "./analysis/repository.js";
@@ -52,9 +53,20 @@ async function main(): Promise<void> {
   let embeddings: EmbeddingProvider;
   if (config.L3_EMBEDDING_ENDPOINT && config.L3_EMBEDDING_API_KEY && config.L3_EMBEDDING_MODEL && config.L3_EMBEDDING_DIMENSIONS) {
     embeddings = new RemoteEmbeddingProvider({ endpoint: config.L3_EMBEDDING_ENDPOINT, apiKey: config.L3_EMBEDDING_API_KEY, model: config.L3_EMBEDDING_MODEL, dimensions: config.L3_EMBEDDING_DIMENSIONS, timeoutMs: config.MCP_CALL_TIMEOUT_MS });
+  } else if (config.L3_LOCAL_EMBEDDING_MODEL && config.L3_LOCAL_EMBEDDING_DIMENSIONS) {
+    embeddings = new LocalEmbeddingProvider(config.L3_LOCAL_EMBEDDING_MODEL,config.L3_LOCAL_EMBEDDING_DIMENSIONS,{dtype:config.L3_LOCAL_EMBEDDING_DTYPE,cacheDir:config.L3_LOCAL_EMBEDDING_CACHE_DIR,localFilesOnly:config.L3_LOCAL_EMBEDDING_LOCAL_FILES_ONLY});
   } else {
-    console.warn("L3_EMBEDDING_* is not fully configured; falling back to a non-semantic word-ngram provider. Candidates produced under this provider are for shadow evaluation only (see MCPSTAT-1-L3 §16).");
+    console.warn("No semantic L3 embedding provider is configured; falling back to a non-semantic word-ngram provider. Candidates produced under this provider are for shadow evaluation only (see MCPSTAT-1-L3 §16).");
     embeddings = new DeterministicFallbackEmbeddingProvider();
+  }
+  let clusterJudge: ClusterJudge;
+  if (config.L3_JUDGE_PROVIDER==="codex-cli") {
+    clusterJudge=new CodexCliClusterJudge({command:config.L3_CODEX_CLI_COMMAND,model:config.L3_CODEX_CLI_MODEL,reasoningEffort:config.L3_CODEX_CLI_REASONING_EFFORT,timeoutMs:config.L3_CODEX_CLI_TIMEOUT_MS});
+  } else if (config.L3_JUDGE_PROVIDER==="remote"&&config.L3_LLM_ENDPOINT && config.L3_LLM_API_KEY && config.L3_LLM_MODEL) {
+    clusterJudge = new RemoteLlmClusterJudge({endpoint:config.L3_LLM_ENDPOINT,apiKey:config.L3_LLM_API_KEY,model:config.L3_LLM_MODEL,timeoutMs:config.MCP_CALL_TIMEOUT_MS});
+  } else {
+    console.warn("No L3 LLM cluster judge is configured; L3 will create shadow-only categories and will not merge or hand candidates to L4.");
+    clusterJudge = new NewClusterOnlyJudge();
   }
   const analysisThresholds = {
     minimumSamples: config.L3_MINIMUM_SAMPLES,
@@ -65,13 +77,12 @@ async function main(): Promise<void> {
     minimumSuccessRate: config.L3_MINIMUM_SUCCESS_RATE,
     minimumCoverageGapCount: config.L3_MINIMUM_COVERAGE_GAPS,
     minimumCoverageGapRatio: config.L3_MINIMUM_COVERAGE_GAP_RATIO,
-    joinSimilarity: config.L3_JOIN_SIMILARITY,
-    mergeSimilarity: config.L3_MERGE_SIMILARITY,
     minimumRebuildMembers: config.L3_MINIMUM_REBUILD_MEMBERS,
   };
-  const analysis = new AnalysisBatchService(analysisRepository, embeddings, analysisThresholds);
+  const decisionSettings={recallTopK:config.L3_RECALL_TOP_K,representativeQueryLimit:config.L3_REPRESENTATIVE_QUERY_LIMIT,minimumRecallSimilarity:config.L3_MINIMUM_RECALL_SIMILARITY};
+  const analysis = new AnalysisBatchService(analysisRepository,embeddings,clusterJudge,analysisThresholds,undefined,config.L3_CANDIDATE_HANDOFF_ENABLED,decisionSettings);
   const analysisScheduler = new AnalysisBatchScheduler(analysis, config.L3_BATCH_INTERVAL_MS, config.L3_BATCH_SIZE, (error) => console.error("L3 analysis batch failed", error));
-  const rebuildJob = new ClusterRebuildJob(analysisRepository, analysisThresholds);
+  const rebuildJob = new ClusterRebuildJob(analysisRepository,clusterJudge,analysisThresholds,decisionSettings);
   const analysisOutboxWorker = new AnalysisOutboxWorker(pool, analysisInputConsumer, { batchSize:config.COLLECTION_WORKER_BATCH_SIZE,leaseMs:config.COLLECTION_LEASE_MS,maxAttempts:config.COLLECTION_MAX_DELIVERY_ATTEMPTS,retryBaseMs:config.COLLECTION_WORKER_INTERVAL_MS });
   const app = createApp(
     { projects, reviews, health, credentials, catalog, gateway, collection }, config.ADMIN_API_KEY, config.HOST, config.MCP_ALLOWED_HOSTS,

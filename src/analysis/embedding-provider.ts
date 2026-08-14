@@ -1,6 +1,14 @@
+import { pipeline, type FeatureExtractionPipelineType } from "@huggingface/transformers";
+
+const createFeatureExtractionPipeline = pipeline as unknown as (
+  task:"feature-extraction",model:string,options:Record<string,unknown>,
+)=>Promise<FeatureExtractionPipelineType>;
+
 export interface EmbeddingProvider {
   /** `<provider>:<model_name>:<dim>`，写入 mcp_query_cluster.embedding_model_version */
   readonly modelVersion: string;
+  /** 显式为 false 时只允许影子聚类，不得将候选投递给 L4。 */
+  readonly candidateHandoffEnabled?: boolean;
   embed(texts: string[]): Promise<number[][]>;
 }
 
@@ -18,6 +26,7 @@ export interface RemoteEmbeddingProviderConfig {
  */
 export class RemoteEmbeddingProvider implements EmbeddingProvider {
   readonly modelVersion: string;
+  readonly candidateHandoffEnabled = true;
   constructor(private readonly config: RemoteEmbeddingProviderConfig) {
     this.modelVersion = `remote:${config.model}:${config.dimensions}`;
   }
@@ -44,18 +53,41 @@ export class RemoteEmbeddingProvider implements EmbeddingProvider {
   }
 }
 
-/**
- * 本地进程内推理占位实现：待接入开源多语言句向量模型（如 transformers.js + ONNX）时替换本文件内部实现，
- * 对外的 EmbeddingProvider 接口和调用方不需要改动。当前尚未引入模型依赖，构造时直接报错，避免被误当作可用实现。
- */
+export interface LocalEmbeddingProviderOptions {
+  dtype?: "auto" | "fp32" | "fp16" | "q8" | "int8" | "uint8" | "q4" | "bnb4" | "q4f16";
+  cacheDir?: string;
+  revision?: string;
+  localFilesOnly?: boolean;
+}
+
+/** 使用 Transformers.js + ONNX 在 LinkCli 进程内生成归一化句向量。模型按需加载并复用。 */
 export class LocalEmbeddingProvider implements EmbeddingProvider {
   readonly modelVersion: string;
-  constructor(modelName: string, _dimensions: number) {
-    this.modelVersion = `local:${modelName}`;
-    throw new Error("LocalEmbeddingProvider is not wired to a model yet; configure RemoteEmbeddingProvider or provide a model dependency first");
+  readonly candidateHandoffEnabled = true;
+  private extractorPromise: Promise<FeatureExtractionPipelineType> | null = null;
+
+  constructor(private readonly modelName: string, private readonly dimensions: number, private readonly options: LocalEmbeddingProviderOptions = {}) {
+    this.modelVersion = `local:${modelName}:${dimensions}`;
   }
-  async embed(): Promise<number[][]> {
-    throw new Error("LocalEmbeddingProvider is not wired to a model yet");
+
+  async embed(texts: string[]): Promise<number[][]> {
+    if (texts.length === 0) return [];
+    const extractor = await this.extractor();
+    const output = await extractor(texts,{pooling:"mean",normalize:true});
+    const expectedSize = texts.length * this.dimensions;
+    if (output.size !== expectedSize || output.dims.at(-1) !== this.dimensions) {
+      throw new Error(`Local embedding model returned shape [${output.dims.join(",")}] for ${texts.length} inputs; expected [${texts.length},${this.dimensions}]`);
+    }
+    const values = Array.from(output.data,(value)=>Number(value));
+    return texts.map((_,index)=>values.slice(index*this.dimensions,(index+1)*this.dimensions));
+  }
+
+  private extractor(): Promise<FeatureExtractionPipelineType> {
+    this.extractorPromise ??= createFeatureExtractionPipeline("feature-extraction",this.modelName,{
+      dtype:this.options.dtype??"q8",cache_dir:this.options.cacheDir,revision:this.options.revision,
+      local_files_only:this.options.localFilesOnly??false,
+    });
+    return this.extractorPromise;
   }
 }
 
@@ -66,6 +98,7 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
  */
 export class DeterministicFallbackEmbeddingProvider implements EmbeddingProvider {
   readonly modelVersion = "fallback:word-ngram-hash:256";
+  readonly candidateHandoffEnabled = false;
   private readonly dimensions = 256;
 
   async embed(texts: string[]): Promise<number[][]> {
