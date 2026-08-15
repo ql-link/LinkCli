@@ -23,6 +23,10 @@ export interface BeginCallInput {
   argumentsSummary: JsonObject;
   attribution: CallOutboxRecord["attribution"];
   startedAt: Date;
+  skillId?: string;
+  skillVersionId?: string;
+  skillRunId?: string;
+  skillStepId?: string;
 }
 
 export interface CompleteCallInput {
@@ -190,6 +194,7 @@ export class MemoryCollectionRepository implements CollectionRepository {
       attributionMethod: record.attribution.method, attributionQuality: record.attribution.quality, qualitySignals: clone(record.attribution.qualitySignals),
       argumentsSummary: clone(record.argumentsSummary), resultSummary: clone(record.resultSummary), status: record.status, outcome: record.outcome, errorCode: record.errorCode,
       startedAt: new Date(record.startedAt), completedAt: clone(record.completedAt), durationMs: record.durationMs, createdAt: new Date(now),
+      skillId: record.skillId, skillVersionId: record.skillVersionId, skillRunId: record.skillRunId, skillStepId: record.skillStepId,
     };
     this.events.set(event.id, event);
     return clone(event);
@@ -300,6 +305,7 @@ function outboxFrom(row: RowDataPacket, fingerprintKey: Buffer): CallOutboxRecor
     durationMs: row.duration_ms === null ? null : Number(row.duration_ms), deliveryStatus: row.delivery_status, deliveryAttempts: Number(row.delivery_attempts),
     nextAttemptAt: row.next_attempt_at === null ? toDate(row.started_at) : toDate(row.next_attempt_at), leaseOwner: row.lease_owner, leaseExpiresAt: nullableDate(row.lease_until), deliveredAt: nullableDate(row.delivered_at),
     createdAt: toDate(row.created_at), updatedAt: toDate(row.updated_at),
+    skillId: row.skill_id ?? undefined, skillVersionId: row.skill_version_id ?? undefined, skillRunId: row.skill_run_id ?? undefined, skillStepId: row.skill_step_id ?? undefined,
   };
 }
 
@@ -320,7 +326,8 @@ function eventFrom(row: RowDataPacket): CallEvent {
     projectId: row.project_id, serviceVersionId: row.service_version_id, toolVersionId: row.tool_version_id, projectKey: row.project_key, toolName: row.tool_name, userQuestion: row.user_question, attributionMethod: row.attribution_method === "missing" ? "unavailable" : row.attribution_method,
     attributionQuality: row.attribution_quality, qualitySignals: parseJson(row.validation_signals), argumentsSummary: parseJson(row.arguments_summary),
     resultSummary, status: row.call_status, outcome: row.outcome, errorCode: row.call_error_code ?? null,
-    startedAt: toDate(row.started_at), completedAt: nullableDate(row.completed_at), durationMs: row.duration_ms === null ? null : Number(row.duration_ms), createdAt: toDate(row.received_at) };
+    startedAt: toDate(row.started_at), completedAt: nullableDate(row.completed_at), durationMs: row.duration_ms === null ? null : Number(row.duration_ms), createdAt: toDate(row.received_at),
+    skillId: row.skill_id ?? undefined, skillVersionId: row.skill_version_id ?? undefined, skillRunId: row.skill_run_id ?? undefined, skillStepId: row.skill_step_id ?? undefined };
 }
 
 const eventSelect = `SELECT e.*, COALESCE(o.platform_owner_id, t.platform_owner_id, '') AS platform_owner_id,
@@ -349,8 +356,8 @@ export class MySqlCollectionRepository implements CollectionRepository {
   }
 
   async beginCall(input: BeginCallInput): Promise<CallOutboxRecord> {
-    await this.pool.execute(`INSERT INTO mcp_call_outbox (event_id, credential_id, platform_owner_id, client_conversation_id, client_turn_id, client_turn_sequence, transport_session_id, session_source, attribution_hint, user_question, question_fingerprint, project_id, service_version_id, tool_version_id, project_key, tool_name, arguments_summary, validation_signals, started_at, next_attempt_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [input.id, input.credentialId, input.platformOwnerId, input.attribution.conversationId, input.attribution.clientTurnId, input.attribution.clientTurnSequence, input.attribution.transportSessionId, input.attribution.transportSessionSource, input.attribution.method === "unavailable" ? "missing" : input.attribution.method, input.attribution.userQuestion, input.attribution.questionFingerprint, input.projectId, input.serviceVersionId, input.toolVersionId, input.projectKey, input.toolName, JSON.stringify(input.argumentsSummary), JSON.stringify(input.attribution.qualitySignals), input.startedAt, input.startedAt]);
+    await this.pool.execute(`INSERT INTO mcp_call_outbox (event_id, credential_id, platform_owner_id, client_conversation_id, client_turn_id, client_turn_sequence, transport_session_id, session_source, attribution_hint, user_question, question_fingerprint, project_id, service_version_id, tool_version_id, project_key, tool_name, arguments_summary, validation_signals, skill_id, skill_version_id, skill_run_id, skill_step_id, started_at, next_attempt_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [input.id, input.credentialId, input.platformOwnerId, input.attribution.conversationId, input.attribution.clientTurnId, input.attribution.clientTurnSequence, input.attribution.transportSessionId, input.attribution.transportSessionSource, input.attribution.method === "unavailable" ? "missing" : input.attribution.method, input.attribution.userQuestion, input.attribution.questionFingerprint, input.projectId, input.serviceVersionId, input.toolVersionId, input.projectKey, input.toolName, JSON.stringify(input.argumentsSummary), JSON.stringify(input.attribution.qualitySignals), input.skillId ?? null, input.skillVersionId ?? null, input.skillRunId ?? null, input.skillStepId ?? null, input.startedAt, input.startedAt]);
     const [rows] = await this.pool.query<RowDataPacket[]>("SELECT * FROM mcp_call_outbox WHERE event_id = ?", [input.id]); return outboxFrom(rows[0]!, this.fingerprintKey);
   }
   async completeCall(eventId: string, input: CompleteCallInput): Promise<void> {
@@ -406,8 +413,8 @@ export class MySqlCollectionRepository implements CollectionRepository {
         await connection.execute(`UPDATE mcp_turns SET grace_until = IF(lifecycle_status = 'grace', NULL, grace_until), lifecycle_status = IF(lifecycle_status = 'grace', 'collecting', lifecycle_status), settlement_status = IF(?, 'pending', settlement_status), settlement_revision = settlement_revision + IF(?, 1, 0), settlement_attempts = IF(?, 0, settlement_attempts), next_settlement_at = IF(?, NULL, next_settlement_at), call_count = call_count + 1, error_count = error_count + ?, execution_outcome = CASE WHEN ? = 'error' THEN 'ended_with_error' WHEN ? = 'success' AND error_count > 0 THEN 'recovered_after_error' WHEN ? = 'success' THEN 'all_calls_succeeded' ELSE execution_outcome END, first_event_at = LEAST(first_event_at, ?), last_event_at = GREATEST(last_event_at, ?), quality_status = CASE WHEN quality_status = 'partial' OR ? = 'partial' THEN 'partial' WHEN quality_status = 'suspicious' OR ? = 'suspicious' THEN 'suspicious' ELSE quality_status END, updated_at = ? WHERE id = ?`,
           [lateRevision, lateRevision, lateRevision, lateRevision, record.outcome === "error" ? 1 : 0, record.outcome, record.outcome, record.outcome, record.startedAt, record.startedAt, record.status, record.attribution.quality, now, turn.id]);
       }
-      await connection.execute(`INSERT INTO mcp_call_events (event_id, turn_id, ingress_order, credential_id, project_id, service_version_id, tool_version_id, project_key, tool_name, user_question, arguments_summary, result_summary, call_status, outcome, call_error_code, validation_signals, started_at, completed_at, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [record.id, turn?.id ?? null, record.ingressSequence, record.credentialId, record.projectId, record.serviceVersionId, record.toolVersionId, record.projectKey, record.toolName, record.attribution.userQuestion, JSON.stringify(record.argumentsSummary), record.resultSummary ? JSON.stringify(record.resultSummary) : null, record.status, record.outcome, record.errorCode, JSON.stringify(record.attribution.qualitySignals), record.startedAt, record.completedAt, record.durationMs]);
+      await connection.execute(`INSERT INTO mcp_call_events (event_id, turn_id, ingress_order, credential_id, project_id, service_version_id, tool_version_id, project_key, tool_name, user_question, arguments_summary, result_summary, call_status, outcome, call_error_code, validation_signals, skill_id, skill_version_id, skill_run_id, skill_step_id, started_at, completed_at, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [record.id, turn?.id ?? null, record.ingressSequence, record.credentialId, record.projectId, record.serviceVersionId, record.toolVersionId, record.projectKey, record.toolName, record.attribution.userQuestion, JSON.stringify(record.argumentsSummary), record.resultSummary ? JSON.stringify(record.resultSummary) : null, record.status, record.outcome, record.errorCode, JSON.stringify(record.attribution.qualitySignals), record.skillId ?? null, record.skillVersionId ?? null, record.skillRunId ?? null, record.skillStepId ?? null, record.startedAt, record.completedAt, record.durationMs]);
       const [rows] = await connection.query<RowDataPacket[]>(`${eventSelect} WHERE e.event_id = ?`, [record.id]); return eventFrom(rows[0]!);
     }, candidateLock);
   }

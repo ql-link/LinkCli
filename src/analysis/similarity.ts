@@ -60,10 +60,10 @@ export function modulePathOf(calls: AnalysisCall[]): { projectScope: string | nu
   return { projectScope: scope, modulePath: path, modulePathHash: sha256(JSON.stringify(qualifiedPath)) };
 }
 
-export function sceneOf(calls: AnalysisCall[]): { key: string; type: string; risk: "low" | "medium" | "high"; toolPath: Array<{ projectId: string; moduleId: string | null; toolName: string; operation: string | null }> } | null {
+export function sceneOf(calls: AnalysisCall[]): { key: string; type: string; risk: "low" | "medium" | "high"; toolPath: Array<{ projectId: string; moduleId: string | null; toolName: string; serviceVersionId: string | null; toolVersionId: string | null; operation: string | null }> } | null {
   if (calls.length === 0) return null;
   const sorted = [...calls].sort((a, b) => a.sequence - b.sequence);
-  const toolPath = sorted.map((call) => ({ projectId: call.projectId, moduleId: call.moduleId ?? null, toolName: call.toolName, operation: call.operation ?? null }));
+  const toolPath = sorted.map((call) => ({ projectId: call.projectId, moduleId: call.moduleId ?? null, toolName: call.toolName, serviceVersionId: call.serviceVersionId ?? null, toolVersionId: call.toolVersionId ?? null, operation: call.operation ?? null }));
   const type = sorted.map((call) => call.operation?.trim() || call.toolName).join(" → ");
   const high = sorted.some((call) => /delete|remove|删除|移除/i.test(call.operation ?? call.toolName));
   const medium = sorted.some((call) => /update|edit|change|create|修改|更新|编辑|新增|创建/i.test(call.operation ?? call.toolName));

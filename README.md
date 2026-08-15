@@ -68,3 +68,19 @@ npm run test:mysql
 ```
 
 该测试只接受库名以 `_dev` 或 `_test` 结尾的显式 `LINKCLI_TEST_MYSQL_URL`，执行前后会清空测试范围内的 LinkCli 表，不得指向共享业务库或生产库。测试同时覆盖网关持久化和 L3 批处理、聚类、场景统计及候选 Outbox。
+
+生成 L4 端到端背景数据（480 条样本、8 个 Query 类别、80 个稳定 Actor）并运行真实本地 Streamable HTTP 下游测试：
+
+```bash
+npm run data:l4:e2e
+npm test -- --run tests/l4-e2e.integration.test.ts
+```
+
+在隔离的 MySQL 测试库中运行同一条 L3 → L4 链路：
+
+```bash
+LINKCLI_TEST_MYSQL_URL='mysql://<user>:<password>@127.0.0.1:<port>/<linkcli_test>' \
+  npm test -- --run tests/mysql-l4-e2e.integration.test.ts
+```
+
+该 L4 测试会验证候选 Outbox、Skill 版本、异步验证队列、验证反馈、审核/激活、真实 MCP 调用及带 Skill 关联字段的 L2 Call Event；测试库会在前后清理，禁止使用共享或生产数据库。

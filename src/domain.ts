@@ -172,6 +172,10 @@ export interface CallOutboxRecord {
   deliveredAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
+  skillId?: string;
+  skillVersionId?: string;
+  skillRunId?: string;
+  skillStepId?: string;
 }
 
 export interface CallEvent {
@@ -198,6 +202,10 @@ export interface CallEvent {
   completedAt: Date | null;
   durationMs: number | null;
   createdAt: Date;
+  skillId?: string;
+  skillVersionId?: string;
+  skillRunId?: string;
+  skillStepId?: string;
 }
 
 export interface ConversationTurn {
