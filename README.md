@@ -28,6 +28,12 @@ npm run admin:bootstrap -- --username operator --display-name "平台运营"
 
 第二条命令从终端读取首个运营管理员密码，不要把密码放进命令参数。`npm run dev` 同时启动 API 和 Vite 控制台；生产构建由 Express 同域托管 `web/dist`。
 
+已有数据库启用 L3 定时分析前，先从同一份 `src/db/schema.sql` 真值源补齐分析表：
+
+```bash
+npm run db:upgrade:analysis
+```
+
 ## 接口
 
 - `GET /healthz`：进程健康检查。
@@ -37,6 +43,8 @@ npm run admin:bootstrap -- --username operator --display-name "平台运营"
 - `/mcp`：标准 MCP Streamable HTTP 入口，使用 `Authorization: Bearer <platform-token>`。
 
 为了精确记录“一轮用户输入触发的多次 MCP 调用”，宿主应在同一轮所有 `tools/call` 的 `_meta` 中传入相同的 `com.tolink.stats/conversation-id` 和 `com.tolink.stats/turn-id`。工具定义要求携带 `__linkcli_user_question`，用于问题下钻和未适配宿主的空闲窗口兼容推断；该字段不会传给下游 MCP。
+
+L3 Query 分析不在 `/mcp` 实时链路中执行。L2 将已结算轮次写入 `mcp_analysis_outbox`，后台 Worker 关联轮次和调用明细，幂等转换为 `mcp_analysis_input`；L3 再定时批量按 `Project + 有序 Module Path` 限定候选范围，基于 Query 语义聚类，并将查询、修改、删除等 Tool 操作归纳为组内场景。当前注册模型尚无独立 Module 实体，也尚未完成符合该口径的语义聚类；Project 快照和字符相似度只是现有代码状态，不是已验收的正式方案。
 
 管理接口和状态规则详见 [架构说明](docs/architecture.md)。
 
@@ -50,7 +58,7 @@ npm run build
 npm run check
 ```
 
-自动化测试使用内存仓库和确定性 MCP 替身，并包含真实 Streamable HTTP 协议边界测试。它们不证明目标 MySQL 实例、真实项目 MCP 或部署环境已经就绪。
+自动化测试使用内存仓库和确定性 MCP 替身，并包含真实 Streamable HTTP 协议边界测试。L3 固定样例测试验证了批处理、场景、幂等和 Outbox 结构，但不代表自然语言聚类质量通过。真实 MCP 的 50 条 Query 测试产生了 50 个单例类别，当前语义聚类仍未完成。真实 MySQL 测试文件共享专用测试库，因此 `npm run test:mysql` 强制串行执行，避免测试间清表互相干扰。
 
 连接专用开发数据库执行真实 MySQL + 标准 MCP 端到端联调：
 
@@ -59,4 +67,20 @@ set -a && source .env.development.local && set +a
 npm run test:mysql
 ```
 
-该测试只接受库名以 `_dev` 或 `_test` 结尾的显式 `LINKCLI_TEST_MYSQL_URL`，执行前后会清空测试范围内的 LinkCli 表，不得指向共享业务库或生产库。
+该测试只接受库名以 `_dev` 或 `_test` 结尾的显式 `LINKCLI_TEST_MYSQL_URL`，执行前后会清空测试范围内的 LinkCli 表，不得指向共享业务库或生产库。测试同时覆盖网关持久化和 L3 批处理、聚类、场景统计及候选 Outbox。
+
+生成 L4 端到端背景数据（480 条样本、8 个 Query 类别、80 个稳定 Actor）并运行真实本地 Streamable HTTP 下游测试：
+
+```bash
+npm run data:l4:e2e
+npm test -- --run tests/l4-e2e.integration.test.ts
+```
+
+在隔离的 MySQL 测试库中运行同一条 L3 → L4 链路：
+
+```bash
+LINKCLI_TEST_MYSQL_URL='mysql://<user>:<password>@127.0.0.1:<port>/<linkcli_test>' \
+  npm test -- --run tests/mysql-l4-e2e.integration.test.ts
+```
+
+该 L4 测试会验证候选 Outbox、Skill 版本、异步验证队列、验证反馈、审核/激活、真实 MCP 调用及带 Skill 关联字段的 L2 Call Event；测试库会在前后清理，禁止使用共享或生产数据库。

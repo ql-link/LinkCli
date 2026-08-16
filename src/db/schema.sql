@@ -49,12 +49,14 @@ CREATE TABLE mcp_tool_versions (
   id CHAR(36) NOT NULL COMMENT '工具版本主键 UUID',
   service_version_id CHAR(36) NOT NULL COMMENT '所属服务版本',
   original_name VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT '服务原始工具名',
+  module_key VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NULL COMMENT '登记时由项目负责人指定的业务模块标识，供 L3 聚类使用，不由系统猜测',
   description TEXT NOT NULL COMMENT '工具说明',
   input_schema JSON NOT NULL COMMENT '原始输入定义',
   output_schema JSON NULL COMMENT '原始输出定义',
   risk_level VARCHAR(16) NOT NULL DEFAULT 'low' COMMENT 'low/medium/high/incompatible',
   PRIMARY KEY (id),
   UNIQUE KEY uk_mcp_tool_versions_service_name (service_version_id, original_name),
+  KEY idx_mcp_tool_versions_module (service_version_id, module_key),
   CONSTRAINT ck_mcp_tool_versions_risk CHECK (risk_level IN ('low', 'medium', 'high', 'incompatible')),
   CONSTRAINT fk_mcp_tool_versions_service FOREIGN KEY (service_version_id) REFERENCES mcp_service_versions (id) ON UPDATE RESTRICT ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='每个服务版本的 MCP 工具定义';
@@ -129,6 +131,279 @@ CREATE TABLE platform_sessions (
   CONSTRAINT fk_platform_sessions_user FOREIGN KEY (user_id) REFERENCES platform_users (id) ON UPDATE RESTRICT ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='LinkCli 控制台登录会话';
 
+CREATE TABLE mcp_analysis_input (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '分析输入内部主键',
+  event_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'L2 结算事件幂等标识',
+  turn_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT '完整用户轮次稳定标识',
+  settlement_version INT UNSIGNED NOT NULL COMMENT '同一轮次结算版本',
+  actor_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL COMMENT '平台用户不可逆 SHA-256 摘要',
+  query_text TEXT NOT NULL COMMENT '用户原始问题，最多由应用写入 4000 字符',
+  query_fingerprint CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL COMMENT '规范化 Query SHA-256',
+  project_scope VARCHAR(512) NULL COMMENT '按实际调用顺序拼接的项目范围',
+  module_path_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NULL COMMENT '有序模块路径 SHA-256，未识别时为空',
+  module_path JSON NULL COMMENT '有序且连续去重的 MCP Module 标识',
+  calls JSON NOT NULL COMMENT '脱敏后的完整调用事实，仅含模块、工具、参数键和结果',
+  behavior_signals JSON NULL COMMENT 'L2 记录的重试、切换和无产出等客观信号',
+  settlement_status VARCHAR(16) NOT NULL COMMENT 'success/partial/failed/unmatched/zero_call',
+  collection_trust VARCHAR(16) NOT NULL COMMENT 'trusted/suspect/missing',
+  attempted_skill_id VARCHAR(191) NULL COMMENT '运行时实际尝试的 Skill，仅作为事实证据',
+  attempted_skill_version VARCHAR(64) NULL COMMENT '实际尝试的 Skill 版本',
+  occurred_at DATETIME(6) NOT NULL COMMENT 'UTC 轮次发生时间',
+  analyzed_at DATETIME(6) NULL COMMENT 'UTC L3 批处理完成时间',
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT 'UTC 入库时间',
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_mcp_analysis_input_event (event_id),
+  UNIQUE KEY uk_mcp_analysis_input_turn_version (turn_id, settlement_version),
+  KEY idx_mcp_analysis_input_pending (analyzed_at, occurred_at, id),
+  KEY idx_mcp_analysis_input_path (project_scope(191), module_path_hash, occurred_at),
+  CONSTRAINT ck_mcp_analysis_input_settlement CHECK (settlement_status IN ('success','partial','failed','unmatched','zero_call')),
+  CONSTRAINT ck_mcp_analysis_input_trust CHECK (collection_trust IN ('trusted','suspect','missing')),
+  CONSTRAINT ck_mcp_analysis_input_version CHECK (settlement_version > 0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='L2 交付给 L3 的完整已结算 Query';
+
+CREATE TABLE mcp_query_cluster (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Query 类别主键',
+  cluster_key CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL COMMENT '类别稳定 SHA-256 标识',
+  cluster_type VARCHAR(16) NOT NULL COMMENT 'normal/uncovered',
+  project_scope VARCHAR(512) NULL COMMENT '项目范围',
+  module_path_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NULL COMMENT '有序模块路径 SHA-256',
+  module_path JSON NULL COMMENT '类别业务模块路径',
+  representative_event_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT '代表 Query 对应输入事件',
+  status VARCHAR(24) NOT NULL DEFAULT 'observing' COMMENT 'observing/candidate_ready/handed_off/cooling/merged/retired',
+  merged_into_cluster_id BIGINT UNSIGNED NULL COMMENT '合并后的目标类别',
+  sample_count BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '门槛有效样本数',
+  distinct_actor_count BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '独立用户摘要数',
+  success_count BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '成功轮次数',
+  coverage_gap_count BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '已有 Skill 覆盖缺口数',
+  attempted_skill_count BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '实际尝试过已有 Skill 的样本数',
+  semantic_cohesion DECIMAL(6,5) NOT NULL DEFAULT 0 COMMENT '类内平均相似度',
+  input_completeness DECIMAL(6,5) NOT NULL DEFAULT 0 COMMENT '可信且路径完整的输入比例',
+  centroid_vector JSON NULL COMMENT '类别语义中心，成员向量算术平均，随成员增减增量更新',
+  embedding_model_version VARCHAR(96) NULL COMMENT '<provider>:<model_name>:<dim>，模型切换后据此分批重算',
+  first_seen_at DATETIME(6) NOT NULL COMMENT 'UTC 首次出现时间',
+  last_seen_at DATETIME(6) NOT NULL COMMENT 'UTC 最近出现时间',
+  cooldown_until DATETIME(6) NULL COMMENT 'UTC 冷却结束时间',
+  version BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '成员或指标变化版本',
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT 'UTC 创建时间',
+  updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6) COMMENT 'UTC 更新时间',
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_mcp_query_cluster_key (cluster_key),
+  KEY idx_mcp_query_cluster_bucket (cluster_type, project_scope(191), module_path_hash, status),
+  KEY idx_mcp_query_cluster_candidate (status, last_seen_at),
+  KEY idx_mcp_query_cluster_model_version (embedding_model_version),
+  CONSTRAINT ck_mcp_query_cluster_type CHECK (cluster_type IN ('normal','uncovered')),
+  CONSTRAINT ck_mcp_query_cluster_status CHECK (status IN ('observing','candidate_ready','handed_off','cooling','merged','retired')),
+  CONSTRAINT fk_mcp_query_cluster_representative FOREIGN KEY (representative_event_id) REFERENCES mcp_analysis_input (event_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT fk_mcp_query_cluster_merged FOREIGN KEY (merged_into_cluster_id) REFERENCES mcp_query_cluster (id) ON UPDATE RESTRICT ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='L3 宽口径 Query 类别';
+
+CREATE TABLE mcp_query_cluster_member (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '类别成员主键',
+  cluster_id BIGINT UNSIGNED NOT NULL COMMENT '所属 Query 类别',
+  analysis_input_id BIGINT UNSIGNED NOT NULL COMMENT '所属完整轮次输入',
+  semantic_similarity DECIMAL(6,5) NOT NULL COMMENT '与类别语义中心的相似度',
+  query_vector JSON NULL COMMENT '该成员的 Query 向量，供质心增量重算和 ClusterRebuildJob 使用',
+  scene_type VARCHAR(512) NULL COMMENT '组内操作场景描述',
+  threshold_eligible BOOLEAN NOT NULL DEFAULT TRUE COMMENT '是否计入候选门槛',
+  quality_success BOOLEAN NOT NULL DEFAULT FALSE COMMENT '整轮成功且没有重试、切路、放弃或无产出信号',
+  exclusion_reason VARCHAR(64) NULL COMMENT '不计门槛原因',
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT 'UTC 归类时间',
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_mcp_query_cluster_member_input (analysis_input_id),
+  KEY idx_mcp_query_cluster_member_cluster (cluster_id, created_at),
+  CONSTRAINT fk_mcp_query_cluster_member_cluster FOREIGN KEY (cluster_id) REFERENCES mcp_query_cluster (id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT fk_mcp_query_cluster_member_input FOREIGN KEY (analysis_input_id) REFERENCES mcp_analysis_input (id) ON UPDATE RESTRICT ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='Query 类别成员';
+
+CREATE TABLE mcp_query_cluster_scene (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '组内场景主键',
+  cluster_id BIGINT UNSIGNED NOT NULL COMMENT '所属 Query 类别',
+  scene_key CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL COMMENT '工具路径和参数键 SHA-256',
+  scene_type VARCHAR(512) NOT NULL COMMENT '组内操作场景描述',
+  tool_path JSON NOT NULL COMMENT '脱敏 Tool 路径',
+  risk_level VARCHAR(16) NOT NULL COMMENT 'low/medium/high',
+  sample_count BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '场景样本数',
+  success_count BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '场景成功数',
+  flow_stability DECIMAL(6,5) NOT NULL DEFAULT 0 COMMENT '场景成功稳定度',
+  first_seen_at DATETIME(6) NOT NULL COMMENT 'UTC 首次出现时间',
+  last_seen_at DATETIME(6) NOT NULL COMMENT 'UTC 最近出现时间',
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT 'UTC 创建时间',
+  updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6) COMMENT 'UTC 更新时间',
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_mcp_query_cluster_scene (cluster_id, scene_key),
+  CONSTRAINT ck_mcp_query_cluster_scene_risk CHECK (risk_level IN ('low','medium','high')),
+  CONSTRAINT fk_mcp_query_cluster_scene_cluster FOREIGN KEY (cluster_id) REFERENCES mcp_query_cluster (id) ON UPDATE RESTRICT ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='Query 类别下的具体 Tool 操作场景';
+
+CREATE TABLE mcp_skill_coverage_gap (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Skill 覆盖缺口主键',
+  cluster_id BIGINT UNSIGNED NOT NULL COMMENT '所属 Query 类别',
+  analysis_input_id BIGINT UNSIGNED NOT NULL COMMENT '缺口证据对应输入',
+  attempted_skill_id VARCHAR(191) NOT NULL COMMENT '运行时实际尝试的 Skill',
+  attempted_skill_version VARCHAR(64) NULL COMMENT '实际尝试的 Skill 版本',
+  gap_type VARCHAR(32) NOT NULL COMMENT 'not_covered/partial_coverage/mismatch/execution_failure',
+  evidence JSON NOT NULL COMMENT '脱敏且可解释的缺口证据',
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT 'UTC 创建时间',
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_mcp_skill_coverage_gap_input_skill (analysis_input_id, attempted_skill_id),
+  KEY idx_mcp_skill_coverage_gap_cluster (cluster_id, created_at),
+  CONSTRAINT ck_mcp_skill_coverage_gap_type CHECK (gap_type IN ('not_covered','partial_coverage','mismatch','execution_failure')),
+  CONSTRAINT fk_mcp_skill_coverage_gap_cluster FOREIGN KEY (cluster_id) REFERENCES mcp_query_cluster (id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT fk_mcp_skill_coverage_gap_input FOREIGN KEY (analysis_input_id) REFERENCES mcp_analysis_input (id) ON UPDATE RESTRICT ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='已有 Skill 覆盖过窄或误匹配证据';
+
+CREATE TABLE mcp_cluster_score_history (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '评分历史主键',
+  cluster_id BIGINT UNSIGNED NOT NULL COMMENT '所属 Query 类别',
+  cluster_version BIGINT UNSIGNED NOT NULL COMMENT '评分对应类别版本',
+  score_type VARCHAR(64) NOT NULL COMMENT '评分类型',
+  score_value DECIMAL(8,5) NULL COMMENT '评分值',
+  reason JSON NOT NULL COMMENT '评分构成及变更原因',
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT 'UTC 创建时间',
+  PRIMARY KEY (id),
+  KEY idx_mcp_cluster_score_history_cluster (cluster_id, created_at),
+  CONSTRAINT fk_mcp_cluster_score_history_cluster FOREIGN KEY (cluster_id) REFERENCES mcp_query_cluster (id) ON UPDATE RESTRICT ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='可解释的 Query 类别评分历史';
+
+CREATE TABLE mcp_l4_candidate_outbox (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'L4 候选事件主键',
+  event_id CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL COMMENT '候选事件 SHA-256 幂等标识',
+  cluster_id BIGINT UNSIGNED NOT NULL COMMENT '来源 Query 类别',
+  cluster_version BIGINT UNSIGNED NOT NULL COMMENT '来源类别版本',
+  candidate_type VARCHAR(24) NOT NULL COMMENT 'new_skill/expand_skill/uncovered_demand',
+  payload JSON NOT NULL COMMENT '脱敏的 L4 候选证据',
+  status VARCHAR(16) NOT NULL DEFAULT 'pending' COMMENT 'pending/delivering/delivered/dead',
+  attempt_count INT UNSIGNED NOT NULL DEFAULT 0 COMMENT '投递尝试次数',
+  lease_owner VARCHAR(128) NULL COMMENT 'L4 候选消费者租约持有者',
+  lease_until DATETIME(6) NULL COMMENT 'L4 候选消费者租约截止时间',
+  next_attempt_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT 'UTC 下次投递时间',
+  delivered_at DATETIME(6) NULL COMMENT 'UTC 成功投递时间',
+  last_error_code VARCHAR(64) NULL COMMENT '最近投递错误码',
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT 'UTC 创建时间',
+  updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6) COMMENT 'UTC 更新时间',
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_mcp_l4_candidate_outbox_event (event_id),
+  UNIQUE KEY uk_mcp_l4_candidate_outbox_version (cluster_id, cluster_version, candidate_type),
+  KEY idx_mcp_l4_candidate_outbox_delivery (status, next_attempt_at),
+  CONSTRAINT ck_mcp_l4_candidate_outbox_type CHECK (candidate_type IN ('new_skill','expand_skill','uncovered_demand')),
+  CONSTRAINT ck_mcp_l4_candidate_outbox_status CHECK (status IN ('pending','delivering','delivered','dead')),
+  CONSTRAINT fk_mcp_l4_candidate_outbox_cluster FOREIGN KEY (cluster_id) REFERENCES mcp_query_cluster (id) ON UPDATE RESTRICT ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='L3 向 L4 可靠交付的候选事件';
+
+CREATE TABLE mcp_l4_validation_feedback (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'L4 验证反馈主键',
+  feedback_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT '反馈幂等标识',
+  cluster_id BIGINT UNSIGNED NOT NULL COMMENT '对应 Query 类别',
+  cluster_version BIGINT UNSIGNED NOT NULL COMMENT '对应类别版本',
+  skill_id VARCHAR(191) NULL COMMENT '生成或扩展的 Skill',
+  skill_version VARCHAR(64) NULL COMMENT '生成或扩展的 Skill 版本',
+  verdict VARCHAR(24) NOT NULL COMMENT 'passed/failed/insufficient/cluster_error',
+  replay_summary JSON NULL COMMENT '脱敏回放结论',
+  database_check_summary JSON NULL COMMENT '脱敏数据库反向校验结论',
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT 'UTC 创建时间',
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_mcp_l4_validation_feedback_id (feedback_id),
+  KEY idx_mcp_l4_validation_feedback_cluster (cluster_id, created_at),
+  CONSTRAINT ck_mcp_l4_validation_feedback_verdict CHECK (verdict IN ('passed','failed','insufficient','cluster_error')),
+  CONSTRAINT fk_mcp_l4_validation_feedback_cluster FOREIGN KEY (cluster_id) REFERENCES mcp_query_cluster (id) ON UPDATE RESTRICT ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='L4 回流的 Skill 回放及数据库校验结论';
+
+CREATE TABLE mcp_skills (
+  id CHAR(36) NOT NULL,
+  skill_key VARCHAR(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL,
+  source_cluster_id BIGINT UNSIGNED NOT NULL,
+  source_cluster_version BIGINT UNSIGNED NOT NULL,
+  candidate_type VARCHAR(24) NOT NULL,
+  status VARCHAR(24) NOT NULL,
+  current_version_id CHAR(36) NULL,
+  exposure_percent TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  revision INT UNSIGNED NOT NULL DEFAULT 0,
+  status_reason VARCHAR(255) NULL,
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_mcp_skills_source (source_cluster_id, source_cluster_version, candidate_type),
+  KEY idx_mcp_skills_status (status, updated_at),
+  CONSTRAINT ck_mcp_skills_candidate_type CHECK (candidate_type IN ('new_skill','expand_skill','uncovered_demand')),
+  CONSTRAINT ck_mcp_skills_status CHECK (status IN ('draft','validating','pending_review','canary','active','paused','degraded','retired')),
+  CONSTRAINT fk_mcp_skills_cluster FOREIGN KEY (source_cluster_id) REFERENCES mcp_query_cluster (id) ON UPDATE RESTRICT ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='L4 Skill 生命周期主表';
+
+CREATE TABLE mcp_skill_versions (
+  id CHAR(36) NOT NULL,
+  skill_id CHAR(36) NOT NULL,
+  version_no INT UNSIGNED NOT NULL,
+  definition JSON NOT NULL,
+  dependency_snapshot JSON NOT NULL,
+  generator_model VARCHAR(191) NOT NULL,
+  source_event_id VARCHAR(64) NOT NULL,
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_mcp_skill_versions_number (skill_id, version_no),
+  UNIQUE KEY uk_mcp_skill_versions_source_event (source_event_id),
+  CONSTRAINT fk_mcp_skill_versions_skill FOREIGN KEY (skill_id) REFERENCES mcp_skills (id) ON UPDATE RESTRICT ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='L4 不可变 Skill 版本';
+
+ALTER TABLE mcp_skills ADD CONSTRAINT fk_mcp_skills_current_version FOREIGN KEY (current_version_id) REFERENCES mcp_skill_versions (id) ON UPDATE RESTRICT ON DELETE RESTRICT;
+
+CREATE TABLE mcp_skill_validation_runs (
+  id CHAR(36) NOT NULL,
+  skill_id CHAR(36) NOT NULL,
+  skill_version_id CHAR(36) NOT NULL,
+  trigger_type VARCHAR(24) NOT NULL,
+  sample_set_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  verdict VARCHAR(24) NOT NULL,
+  replay_summary JSON NOT NULL,
+  database_check_summary JSON NOT NULL,
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_mcp_skill_validation_idempotency (skill_version_id, trigger_type, sample_set_hash),
+  KEY idx_mcp_skill_validation_skill (skill_id, created_at),
+  CONSTRAINT ck_mcp_skill_validation_trigger CHECK (trigger_type IN ('generation','revision','dependency_change','runtime_anomaly','manual')),
+  CONSTRAINT ck_mcp_skill_validation_verdict CHECK (verdict IN ('passed','failed','insufficient','cluster_error')),
+  CONSTRAINT fk_mcp_skill_validation_skill FOREIGN KEY (skill_id) REFERENCES mcp_skills (id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT fk_mcp_skill_validation_version FOREIGN KEY (skill_version_id) REFERENCES mcp_skill_versions (id) ON UPDATE RESTRICT ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='L4 固定样本验证运行记录';
+
+CREATE TABLE mcp_skill_reviews (
+  id CHAR(36) NOT NULL,
+  skill_id CHAR(36) NOT NULL,
+  skill_version_id CHAR(36) NOT NULL,
+  decision VARCHAR(16) NOT NULL,
+  comment VARCHAR(1000) NULL,
+  reviewer_id VARCHAR(64) NOT NULL,
+  decided_at DATETIME(6) NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_mcp_skill_reviews_version (skill_version_id),
+  CONSTRAINT ck_mcp_skill_reviews_decision CHECK (decision IN ('approved','rejected')),
+  CONSTRAINT fk_mcp_skill_reviews_skill FOREIGN KEY (skill_id) REFERENCES mcp_skills (id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT fk_mcp_skill_reviews_version FOREIGN KEY (skill_version_id) REFERENCES mcp_skill_versions (id) ON UPDATE RESTRICT ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='L4 Skill 人工审核记录';
+
+CREATE TABLE mcp_skill_validation_jobs (
+  id CHAR(36) NOT NULL,
+  skill_id CHAR(36) NOT NULL,
+  skill_version_id CHAR(36) NOT NULL,
+  trigger_type VARCHAR(24) NOT NULL,
+  status VARCHAR(16) NOT NULL DEFAULT 'pending',
+  attempts INT UNSIGNED NOT NULL DEFAULT 0,
+  next_attempt_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  lease_owner VARCHAR(128) NULL,
+  lease_until DATETIME(6) NULL,
+  last_error VARCHAR(64) NULL,
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_mcp_skill_validation_jobs_version_trigger (skill_version_id, trigger_type),
+  KEY idx_mcp_skill_validation_jobs_claim (status, next_attempt_at, id),
+  CONSTRAINT ck_mcp_skill_validation_jobs_trigger CHECK (trigger_type IN ('generation','revision','dependency_change','runtime_anomaly','manual')),
+  CONSTRAINT ck_mcp_skill_validation_jobs_status CHECK (status IN ('pending','running','completed','dead')),
+  CONSTRAINT fk_mcp_skill_validation_jobs_skill FOREIGN KEY (skill_id) REFERENCES mcp_skills (id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT fk_mcp_skill_validation_jobs_version FOREIGN KEY (skill_version_id) REFERENCES mcp_skill_versions (id) ON UPDATE RESTRICT ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='L4 异步 Skill 验证队列';
+
+-- L3 ANALYSIS SCHEMA END
+
 CREATE TABLE mcp_call_outbox (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '调用接收顺序及物理主键',
   event_id CHAR(36) NOT NULL COMMENT '单次工具调用 UUID',
@@ -149,6 +424,10 @@ CREATE TABLE mcp_call_outbox (
   tool_version_id CHAR(36) NOT NULL COMMENT '实际调用工具版本',
   project_key VARCHAR(48) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT '项目标识快照',
   tool_name VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT '原始工具名快照',
+  skill_id CHAR(36) NULL COMMENT '所属 Skill 标识',
+  skill_version_id CHAR(36) NULL COMMENT '所属 Skill 版本',
+  skill_run_id CHAR(36) NULL COMMENT '一次 Skill 运行标识',
+  skill_step_id VARCHAR(128) NULL COMMENT 'Skill 内部步骤标识',
   arguments_summary JSON NOT NULL COMMENT '脱敏截断后的调用参数摘要',
   result_summary JSON NULL COMMENT '脱敏截断后的调用结果摘要',
   call_status VARCHAR(16) NOT NULL DEFAULT 'started' COMMENT 'started/completed/partial',
@@ -248,6 +527,10 @@ CREATE TABLE mcp_call_events (
   tool_version_id CHAR(36) NOT NULL COMMENT '实际调用工具版本',
   project_key VARCHAR(48) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT '项目标识快照',
   tool_name VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT '工具名快照',
+  skill_id CHAR(36) NULL COMMENT '所属 Skill 标识',
+  skill_version_id CHAR(36) NULL COMMENT '所属 Skill 版本',
+  skill_run_id CHAR(36) NULL COMMENT '一次 Skill 运行标识',
+  skill_step_id VARCHAR(128) NULL COMMENT 'Skill 内部步骤标识',
   user_question TEXT NULL COMMENT '本次调用携带的问题原文',
   arguments_summary JSON NOT NULL COMMENT '脱敏参数摘要',
   result_summary JSON NULL COMMENT '脱敏结果摘要',

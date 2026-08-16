@@ -68,6 +68,19 @@ export class ProjectService {
     return { id: randomUUID(), projectId, versionNo, endpoint, protocolVersion, credentialCiphertext: encrypted, credentialKeyId: encrypted ? this.cipher.keyId : null, reviewStatus: "draft", riskLevel, definitionHash: hash, submittedBy, submittedAt: null, createdAt };
   }
   private makeTool(versionId: string, tool: { name: string; description: string; inputSchema: Record<string, unknown>; outputSchema: Record<string, unknown> | null }, riskLevel: RiskLevel): ToolVersion {
-    return { id: randomUUID(), serviceVersionId: versionId, originalName: tool.name, description: tool.description, inputSchema: tool.inputSchema, outputSchema: tool.outputSchema, riskLevel };
+    return { id: randomUUID(), serviceVersionId: versionId, originalName: tool.name, moduleKey: null, description: tool.description, inputSchema: tool.inputSchema, outputSchema: tool.outputSchema, riskLevel };
+  }
+
+  async setToolModule(versionId: string, toolId: string, submittedBy: string, moduleKey: string | null): Promise<ToolVersion> {
+    const version = assertFound(await this.repository.getVersion(versionId), `Version not found: ${versionId}`);
+    if (version.reviewStatus !== "draft") throw new AppError("INVALID_STATE", "Only draft versions can have their module assignment edited", 409);
+    const project = assertFound(await this.repository.getProjectById(version.projectId), `Project not found for version: ${versionId}`);
+    if (project.ownerId !== submittedBy) throw new AppError("AUTHORIZATION_FAILED", "Only the project owner can assign tool modules", 403);
+    const tools = await this.repository.listTools(versionId);
+    if (!tools.some((tool) => tool.id === toolId)) throw new AppError("NOT_FOUND", `Tool not found: ${toolId}`, 404);
+    const normalized = moduleKey && moduleKey.trim() ? moduleKey.trim() : null;
+    const updated = await this.repository.updateToolModule(toolId, normalized);
+    if (!updated) throw new AppError("NOT_FOUND", `Tool not found: ${toolId}`, 404);
+    return updated;
   }
 }

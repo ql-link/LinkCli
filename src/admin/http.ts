@@ -8,13 +8,21 @@ import type { HealthMonitor } from "../registry/health-monitor.js";
 import type { ProjectService } from "../registry/project-service.js";
 import type { ReviewService } from "../registry/review-service.js";
 import type { CollectionRepository } from "../collection/repository.js";
+import type { SkillService } from "../skill/service.js";
 
 const projectSchema = z.object({ projectKey: z.string(), displayName: z.string(), description: z.string(), endpoint: z.string(), projectToken: z.string().min(1).optional() });
 const versionSchema = z.object({ endpoint: z.string(), projectToken: z.string().min(1).optional() });
 const reviewSchema = z.object({ decision: z.enum(["approved", "rejected"]), comment: z.string().optional() });
 const statusSchema = z.object({ action: z.enum(["disable", "enable", "retire"]) });
 const bypassSchema = z.object({ enabled: z.boolean() });
+const toolModuleSchema = z.object({ moduleKey: z.string().min(1).nullable() });
 const credentialSchema = z.object({ credentialName: z.string(), expiresAt: z.string().datetime().nullable().optional() });
+const skillCandidateSchema = z.object({ eventId: z.string().min(1), clusterId: z.number().int().positive(), clusterVersion: z.number().int().positive(), candidateType: z.enum(["new_skill", "expand_skill", "uncovered_demand"]), payload: z.record(z.unknown()) });
+const skillValidationSchema = z.object({ trigger: z.enum(["generation", "revision", "dependency_change", "runtime_anomaly", "manual"]) });
+const skillReviewSchema = z.object({ decision: z.enum(["approved", "rejected"]), comment: z.string().max(1000).nullable().optional() });
+const skillLifecycleSchema = z.object({ action: z.enum(["canary", "activate", "pause", "resume", "degrade", "retire"]), reason: z.string().max(255).nullable().optional() });
+const skillDefinitionSchema = z.object({ name: z.string().min(1), description: z.string(), inputSchema: z.record(z.unknown()), outputSchema: z.record(z.unknown()).nullable(), steps: z.array(z.object({ id: z.string().min(1), tool: z.object({ projectId: z.string().min(1), serviceVersionId: z.string().nullable(), toolVersionId: z.string().nullable(), originalName: z.string().min(1) }), inputMapping: z.record(z.unknown()), outputKey: z.string().nullable() })), validationCases: z.array(z.object({ id: z.string().min(1), query: z.string().min(1), input: z.record(z.unknown()), expected: z.record(z.unknown()).nullable() })).min(1) });
+const skillDependencySchema = z.object({ toolVersionId: z.string().min(1), reason: z.string().max(255).optional() });
 
 declare global { namespace Express { interface Request { platformIdentity?: PlatformIdentity; } } }
 
@@ -49,7 +57,7 @@ const requireRole = (allowed: PlatformIdentity["role"][]) => (req: Request, _res
   } catch (error) { next(error); }
 };
 
-export interface AdminServices { projects: ProjectService; reviews: ReviewService; health: HealthMonitor; credentials: CredentialService; collection?: CollectionRepository; }
+export interface AdminServices { projects: ProjectService; reviews: ReviewService; health: HealthMonitor; credentials: CredentialService; collection?: CollectionRepository; skills?: SkillService; }
 
 export function createAdminRouter(services: AdminServices, adminApiKey: string): Router {
   const router = Router();
@@ -67,6 +75,10 @@ export function createAdminRouter(services: AdminServices, adminApiKey: string):
   router.post("/projects/:key/versions", requireRole(["owner"]), async (req, res) => {
     const body = versionSchema.parse(req.body); const created = await services.projects.createVersion({ projectKey: String(req.params.key), ...body, submittedBy: req.platformIdentity!.userId });
     res.status(201).json({ version: versionView(created.version), tools: created.tools, suspendedTools: created.suspendedTools });
+  });
+  router.patch("/versions/:id/tools/:toolId/module", requireRole(["owner"]), async (req, res) => {
+    const body = toolModuleSchema.parse(req.body);
+    res.json(await services.projects.setToolModule(String(req.params.id), String(req.params.toolId), req.platformIdentity!.userId, body.moduleKey));
   });
   router.patch("/projects/:key/trusted-review-bypass", requireRole(["operator"]), async (req, res) => {
     const body = bypassSchema.parse(req.body); res.json(await services.projects.setTrustedBypass(String(req.params.key), body.enabled));
@@ -88,6 +100,17 @@ export function createAdminRouter(services: AdminServices, adminApiKey: string):
   });
   router.get("/credentials", requireRole(["platform_user", "owner", "reviewer", "operator"]), async (req, res) => { res.json(await services.credentials.list(req.platformIdentity!.userId)); });
   router.delete("/credentials/:id", requireRole(["platform_user", "owner", "reviewer", "operator"]), async (req, res) => { res.json(credentialView(await services.credentials.revoke(String(req.params.id), req.platformIdentity!.userId))); });
+  if (services.skills) {
+    router.get("/skills", requireRole(["owner", "reviewer", "operator"]), async (_req, res) => { res.json({ skills: await services.skills!.list() }); });
+    router.get("/skills/:id", requireRole(["owner", "reviewer", "operator"]), async (req, res) => { res.json({ skill: await services.skills!.get(String(req.params.id)) }); });
+    router.post("/skills/candidates", requireRole(["owner", "operator"]), async (req, res) => { const body = skillCandidateSchema.parse(req.body); res.status(201).json({ skill: await services.skills!.receiveCandidate(body) }); });
+    router.post("/skills/:id/validate", requireRole(["owner", "operator"]), async (req, res) => { const body = skillValidationSchema.parse(req.body); res.status(202).json({ job: await services.skills!.enqueueValidation(String(req.params.id), body.trigger) }); });
+    router.post("/skills/:id/revise", requireRole(["owner", "operator"]), async (req, res) => { const body = skillDefinitionSchema.parse(req.body); res.status(201).json(await services.skills!.revise(String(req.params.id), body, req.platformIdentity!.userId)); });
+    router.post("/skills/:id/submit-review", requireRole(["owner", "operator"]), async (req, res) => { res.json(await services.skills!.submitReview(String(req.params.id), req.platformIdentity!.userId)); });
+    router.post("/skills/:id/review", requireRole(["reviewer"]), async (req, res) => { const body = skillReviewSchema.parse(req.body); res.json(await services.skills!.decideReview(String(req.params.id), body.decision, req.platformIdentity!.userId, body.comment ?? null)); });
+    router.post("/skills/:id/lifecycle", requireRole(["owner", "operator"]), async (req, res) => { const body = skillLifecycleSchema.parse(req.body); res.json({ skill: await services.skills!.lifecycle(String(req.params.id), body.action, body.reason ?? null) }); });
+    router.post("/skills/dependency-events", requireRole(["operator"]), async (req, res) => { const body = skillDependencySchema.parse(req.body); res.status(202).json({ skillIds: await services.skills!.handleDependencyChange(body.toolVersionId, body.reason) }); });
+  }
   if (services.collection) router.post("/collection/dead-letters/:id/replay", requireRole(["operator"]), async (req, res) => {
     const id = String(req.params.id); const replayed = await services.collection!.replayDeadLetter(id, new Date());
     if (!replayed) throw new AppError("NOT_FOUND", "Dead-letter event not found", 404);

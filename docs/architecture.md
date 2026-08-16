@@ -5,6 +5,7 @@
 - `src/registry`：标准 MCP 工具发现、不可变服务版本、风险分类、人工审核、可信项目免审、探活和项目状态。
 - `src/gateway`：平台凭据、统一工具清单、工具路由、项目 Token 装配、标准 MCP 服务端和错误映射。
 - `src/collection`：解析宿主轮次上下文、生成问题与轮次 HMAC、持久化调用 Outbox、归集轮次、结算规范调用链、重试死信和执行保留期清理。
+- `src/analysis`：消费 L2 已结算的完整 Query，按定时批次完成模块路径提取、宽口径聚类、组内场景统计、覆盖缺口识别和 L4 候选 Outbox 写入。
 - `src/statistics`：按项目可见性查询调用量、轮次、工具、质量和调用明细，并提供死信重放的控制台入口。
 - `src/db`：MySQL 物理模型、事务和查询；`schema.sql` 是绿地数据库真值源。
 - `src/auth`：控制台账号、Argon2id 密码和 7 天滑动服务端会话。
@@ -41,9 +42,25 @@
 
 调用明细和用户问题默认保留九十天，已投递 L1 Outbox 默认保留七天，死信最多保留九十天；轮次计数和不含参数值的规范调用链长期保留。清理是不可恢复操作。统计入口为 `/api/statistics/summary`、`/api/statistics/tools`、`/api/statistics/turns`、`/api/statistics/calls` 和轮次详情；部署管理入口还提供 `/admin/collection/dead-letters/:id/replay`。
 
+## L3 定时 Query 分析
+
+L3 不消费单次 `CallEnvelope`，也不在用户请求期间实时聚类。它只处理 L2 写入 `mcp_analysis_input` 的完整已结算轮次；输入必须包含稳定 `turn_id`、结算版本、Query、不可逆用户摘要，以及实际 Project、Module、Tool、参数键和结果。零调用或未命中 MCP 的 Query 也必须由 L2 显式写入，否则 L3 无法发现这类需求。
+
+L2 结算成功后先写入 `mcp_analysis_outbox`。后台 Analysis Outbox Worker 通过租约至少一次领取事件，关联 `mcp_turns` 和 `mcp_call_events` 补齐完整事实，再以 `event_id` 和 `turn_id + settlement_version` 双重幂等写入 `mcp_analysis_input`；输入已经写入但确认 Outbox 前进程退出时，重放不会重复计数。候选范围要求使用调用时保存的稳定 `project_id/module_id/tool_id` 快照；当前注册表没有独立 Module 实体，Project 快照只能作为链路测试代理，不能当作正式 Module 边界。
+
+同一 `turn_id` 在批处理前到达更高结算版本时，旧版本被标记为已取代且不参与聚类；轮次已经分析后不接受静默改版，调用方必须发起显式补偿重建，避免旧成员、场景和频次残留在类别中。
+
+调度器默认每 5 分钟读取最多 1000 条未分析输入，并使用 MySQL advisory lock 避免多个 LinkCli 实例同时执行批次。正常输入按有序 `Project/Module` 组合限定候选范围，先用文本指纹去重，再用本地语义模型与类别语义中心比较；查询、修改、删除等 Tool 动作只形成组内场景，不作为 Query 类别硬边界。系统还需周期性执行合并与拆分检查，修正增量处理顺序带来的误差。单条输入失败时只回滚该输入并继续批次，失败记录保留到下一批重试。
+
+候选门槛由 `L3_*` 环境变量配置。没有尝试现有 Skill 且质量达标的类别产生 `new_skill`，明确存在覆盖缺口的类别产生 `expand_skill`，零调用类别产生 `uncovered_demand`。候选与类别状态在同一事务写入 `mcp_l4_candidate_outbox`；同一类别的同类候选只交付一次，但 `new_skill` 交付后仍可因后续覆盖缺口产生一次 `expand_skill`。L3 不生成 Skill、不调用业务 MCP，也不主动查询权威业务数据库；回放和数据库反向校验属于 L4。
+
+空库通过 `npm run db:init` 创建全部表；已有数据库在启用调度器前运行 `npm run db:upgrade:analysis`。升级脚本只从 `src/db/schema.sql` 的 L3 标记位置读取并使用 `CREATE TABLE IF NOT EXISTS`，不维护第二份 DDL。
+
 ## 已知运行限制
 
 - 进程内清单和健康计数不提供跨实例强一致性，数据库生效指针仍是发布真值源。
 - 轮次 Worker 当前与网关进程同部署，可靠事实在 MySQL；多实例通过行锁和领取租约协作，但定时任务指标仍需由外部监控采集。
+- 零调用和未命中 MCP 的 Query 仍需要宿主提供明确的轮次结束事件；仅靠 `tools/call` 无法发现没有调用行为的需求。
+- 当前字符二元组相似度在 50 条真实 MCP Query 测试中产生 50 个单例类别，已确认不能作为正式语义聚类方案。
 - `L4_EVENT_ENDPOINT` 未配置时，暂停、恢复、发布、探活失败和七天滞留事件只改变平台状态，不会通知外部 Skill 或运营系统。
 - `db:init` 是绿地建表入口；已有 L1 数据库没有自动升级到 L2 表的增量迁移脚本，升级前必须由运维按目标环境单独评审并执行 DDL。

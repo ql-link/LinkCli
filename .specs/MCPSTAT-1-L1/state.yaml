@@ -3,36 +3,26 @@ key: MCPSTAT-1-L1
 title: ''
 source_issue: https://wcnnpvbxd7li.feishu.cn/docx/C1gydvIiuoxoRcx6DDgcwYRSnOg
 route: acceptance_first
-phase: release_ready
+phase: acceptance
 artifacts:
   solution:
     file: solution.md
     frozen: true
-    sha256: ef7ad34f1a4858a258ecbf842e95ae4fcfda2973482bbb8e96e8d24c8d312849
+    sha256: 69d01e54daec1dccd9eb7cafcb3188a4c48d6980c26dfe28e79762e6dbfe67be
   acceptance:
     file: acceptance.feature
-    frozen: true
-    sha256: 63d4b0c1ddde9dc7c3c0efe27b79b2f413f4aeb01855ecd37a7f77fd51d854d2
+    frozen: false
+    sha256: null
 verification:
-  verified: true
-  commands:
-  - command: zsh -lc 'set -a; source .env.development.local; set +a; npm run check'
-    exit_code: 0
-    duration_ms: 95761
-    finished_at: '2026-08-06T09:06:22+00:00'
-  code_snapshot:
-    sha256: f567668e4175724e3687b4ee3d13e785809dc5ff4e03be4360b84221a15a7f50
-    file_count: 76
-    head: null
-    captured_at: '2026-08-06T09:06:22+00:00'
+  verified: false
+  commands: []
+  code_snapshot: null
   manual_acceptance: null
-  verified_at: '2026-08-06T09:06:22+00:00'
+  verified_at: null
 quality_review:
-  passed: true
-  evidence:
-  - 首个仓库提交前已排除本地密钥、飞书授权图片、依赖、构建产物和 Python 缓存。模块一冻结验收、真实开发 MySQL 8.0.46、标准 MCP 接入、48
-    项测试、类型检查和构建全部通过；独立复审无剩余阻断。
-  code_snapshot_sha256: f567668e4175724e3687b4ee3d13e785809dc5ff4e03be4360b84221a15a7f50
-  reviewed_at: '2026-08-06T09:06:26+00:00'
+  passed: false
+  evidence: []
+  code_snapshot_sha256: null
+  reviewed_at: null
 created_at: '2026-08-04T14:36:48+00:00'
-updated_at: '2026-08-06T09:06:26+00:00'
+updated_at: '2026-08-14T09:28:52+00:00'
