@@ -21,6 +21,7 @@
     "test:mysql": "vitest run --no-file-parallelism tests/mysql-e2e.integration.test.ts tests/mysql-analysis.integration.test.ts",
     "eval:l3": "tsx scripts/analysis/evaluate-l3-clustering.ts",
     "eval:l3:codex-smoke": "tsx scripts/analysis/smoke-codex-cli-judge.ts",
+    "data:l4:e2e": "node --import tsx scripts/analysis/generate-l4-e2e-data.ts",
     "check": "npm run typecheck && npm run typecheck:web && npm test && npm run build",
     "spec": "python3 scripts/spec/flow_guard.py"
   },

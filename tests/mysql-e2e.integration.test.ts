@@ -177,8 +177,8 @@ realMySqlDescribe("real MySQL and standard MCP end-to-end", () => {
       expect(analysisState).toMatchObject({settlement_version:1,actor_hash:createHash("sha256").update("agent-e2e").digest("hex"),query_text:"请回显 hello",collection_trust:"trusted"});
       expect(typeof analysisState.event_id).toBe("string");
       expect(typeof analysisState.turn_id).toBe("string");
-      expect(typeof analysisState.calls === "string" ? JSON.parse(analysisState.calls) : analysisState.calls).toEqual([{sequence:1,projectId:expect.any(String),moduleId:"devfixture",toolName:"echo",operation:"execute",parameterKeys:["message"],outcome:"success"}]);
-      expect(typeof analysisState.module_path === "string" ? JSON.parse(analysisState.module_path) : analysisState.module_path).toEqual(["devfixture"]);
+      expect(typeof analysisState.calls === "string" ? JSON.parse(analysisState.calls) : analysisState.calls).toEqual([{sequence:1,projectId:expect.any(String),toolName:"echo",serviceVersionId:expect.any(String),toolVersionId:expect.any(String),operation:"execute",parameterKeys:["message"],outcome:"success"}]);
+      expect(typeof analysisState.module_path === "string" ? JSON.parse(analysisState.module_path) : analysisState.module_path).toBeNull();
       const [[analysisDelivery]] = await pool.query<mysql.RowDataPacket[]>("SELECT delivery_status,delivery_attempts,last_error_code FROM mcp_analysis_outbox");
       expect(analysisDelivery).toMatchObject({delivery_status:"delivered",delivery_attempts:1,last_error_code:null});
       let retryAt = new Date(settlementAt.getTime()+10);

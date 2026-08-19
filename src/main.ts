@@ -25,12 +25,20 @@ import { ProjectService } from "./registry/project-service.js";
 import { ReviewService } from "./registry/review-service.js";
 import { ProjectCredentialCipher } from "./security/project-credential.js";
 import { StatisticsService } from "./statistics/service.js";
+import { MySqlSkillRepository } from "./skill/repository.js";
+import { SkillService } from "./skill/service.js";
+import { SkillCandidateWorker } from "./skill/candidate-worker.js";
+import { SkillRuntime } from "./skill/runtime.js";
+import { SkillValidationWorker } from "./skill/validation-worker.js";
+import { MySqlSkillFeedbackSink } from "./skill/feedback.js";
+import { NoopAuthorityChecker, SkillValidationRunner, ToolValidationExecutor } from "./skill/validation.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
   const pool = createPool({ uri: config.DATABASE_URL, connectionLimit: 10, timezone: "Z", dateStrings: false });
   await pool.query("SELECT 1");
   const repository = new MySqlRegistryRepository(pool, pool);
+  const skillRepository = new MySqlSkillRepository(pool, pool);
   const analysisRepository = new MySqlAnalysisRepository(pool, pool);
   const analysisInputConsumer = new AnalysisInputConsumer(analysisRepository);
   const fingerprintKey = Buffer.from(config.COLLECTION_FINGERPRINT_KEY, "base64");
@@ -38,16 +46,18 @@ async function main(): Promise<void> {
   const identity = new IdentityService(new MySqlIdentityRepository(pool));
   const connector = new SdkMcpConnector();
   const cipher = new ProjectCredentialCipher(config.PROJECT_CREDENTIAL_KEY, config.PROJECT_CREDENTIAL_KEY_ID);
+  const skillService = new SkillService(skillRepository, undefined, new SkillValidationRunner(new ToolValidationExecutor(repository, connector, cipher, config.MCP_CALL_TIMEOUT_MS), new NoopAuthorityChecker()));
   const events = config.L4_EVENT_ENDPOINT ? new HttpRegistryEventSink(config.L4_EVENT_ENDPOINT) : new NoopRegistryEventSink();
   const discovery = new DiscoveryService(connector, config.MCP_CALL_TIMEOUT_MS);
   const health = new HealthMonitor(repository, connector, cipher, config.HEALTH_FAILURE_THRESHOLD, config.HEALTH_RECOVERY_THRESHOLD, config.MCP_CALL_TIMEOUT_MS, events);
   const projects = new ProjectService(repository, discovery, cipher, events);
   const reviews = new ReviewService(repository, health, events);
   const credentials = new CredentialService(repository);
-  const catalog = new CatalogService(repository, config.HEALTH_STALE_AFTER_MS);
   const collectionSettings = { idleTimeoutMs: config.COLLECTION_IDLE_TIMEOUT_MS, gracePeriodMs: config.COLLECTION_GRACE_PERIOD_MS, lateRevisionMs: config.COLLECTION_LATE_REVISION_MS, maxCallsPerTurn: config.COLLECTION_MAX_CALLS_PER_TURN, maxDeliveryAttempts: config.COLLECTION_MAX_DELIVERY_ATTEMPTS };
   const collectionWorker = new CollectionWorker(collection, collectionSettings, { batchSize: config.COLLECTION_WORKER_BATCH_SIZE, leaseMs: config.COLLECTION_LEASE_MS, startedCallTimeoutMs: config.COLLECTION_STARTED_CALL_TIMEOUT_MS, retryBaseMs: config.COLLECTION_WORKER_INTERVAL_MS });
   const retention = new RetentionService(collection, config.COLLECTION_DETAIL_RETENTION_DAYS, config.COLLECTION_OUTBOX_RETENTION_DAYS);
+  const skillRuntime = new SkillRuntime(skillService, repository, connector, cipher, health, collection, fingerprintKey, config.MCP_CALL_TIMEOUT_MS);
+  const catalog = new CatalogService(repository, config.HEALTH_STALE_AFTER_MS, skillRuntime);
   const gateway = new GatewayRouter(repository, catalog, connector, cipher, health, collection, fingerprintKey, config.MCP_CALL_TIMEOUT_MS);
   const statistics = new StatisticsService(collection, repository);
   let embeddings: EmbeddingProvider;
@@ -84,8 +94,10 @@ async function main(): Promise<void> {
   const analysisScheduler = new AnalysisBatchScheduler(analysis, config.L3_BATCH_INTERVAL_MS, config.L3_BATCH_SIZE, (error) => console.error("L3 analysis batch failed", error));
   const rebuildJob = new ClusterRebuildJob(analysisRepository,clusterJudge,analysisThresholds,decisionSettings);
   const analysisOutboxWorker = new AnalysisOutboxWorker(pool, analysisInputConsumer, { batchSize:config.COLLECTION_WORKER_BATCH_SIZE,leaseMs:config.COLLECTION_LEASE_MS,maxAttempts:config.COLLECTION_MAX_DELIVERY_ATTEMPTS,retryBaseMs:config.COLLECTION_WORKER_INTERVAL_MS });
+  const skillCandidateWorker = new SkillCandidateWorker(analysisRepository, skillService, { batchSize: config.COLLECTION_WORKER_BATCH_SIZE, leaseMs: config.COLLECTION_LEASE_MS, maxAttempts: config.COLLECTION_MAX_DELIVERY_ATTEMPTS, retryBaseMs: config.COLLECTION_WORKER_INTERVAL_MS });
+  const skillValidationWorker = new SkillValidationWorker(skillRepository, skillService, { batchSize: config.COLLECTION_WORKER_BATCH_SIZE, leaseMs: config.COLLECTION_LEASE_MS, maxAttempts: config.COLLECTION_MAX_DELIVERY_ATTEMPTS, retryBaseMs: config.COLLECTION_WORKER_INTERVAL_MS }, new MySqlSkillFeedbackSink(pool, skillRepository));
   const app = createApp(
-    { projects, reviews, health, credentials, catalog, gateway, collection }, config.ADMIN_API_KEY, config.HOST, config.MCP_ALLOWED_HOSTS,
+    { projects, reviews, health, credentials, catalog, gateway, collection, skills: skillService }, config.ADMIN_API_KEY, config.HOST, config.MCP_ALLOWED_HOSTS,
     { identity, repository, projects, reviews, health, credentials, statistics }, config.WEB_DIST_DIR, config.NODE_ENV === "production",
   );
   const server = app.listen(config.PORT, config.HOST, () => { console.info(`LinkCli listening on http://${config.HOST}:${config.PORT}`); });
@@ -97,7 +109,7 @@ async function main(): Promise<void> {
   let collectionTask: Promise<void> | null = null;
   const collectionTimer = setInterval(() => {
     if (collectionTask) return;
-    collectionTask = collectionWorker.drainOnce().then(() => collectionWorker.maintainOnce()).then(() => analysisOutboxWorker.drainOnce()).then(() => undefined).catch(() => { console.error("Collection worker cycle failed"); }).finally(() => { collectionTask = null; });
+    collectionTask = collectionWorker.drainOnce().then(() => collectionWorker.maintainOnce()).then(() => analysisOutboxWorker.drainOnce()).then(() => skillCandidateWorker.drainOnce()).then(() => skillValidationWorker.drainOnce()).then(() => undefined).catch(() => { console.error("Collection worker cycle failed"); }).finally(() => { collectionTask = null; });
   }, config.COLLECTION_WORKER_INTERVAL_MS);
   collectionTimer.unref();
   const retentionTimer = setInterval(() => { void retention.runOnce().catch(() => { console.error("Collection retention cycle failed"); }); }, 24 * 60 * 60 * 1_000);

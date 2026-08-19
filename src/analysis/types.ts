@@ -9,6 +9,9 @@ export interface AnalysisCall {
   projectId: string;
   moduleId?: string;
   toolName: string;
+  /** L1 immutable dependency snapshot captured when the call was observed. */
+  serviceVersionId?: string;
+  toolVersionId?: string;
   operation?: string;
   parameterKeys: string[];
   outcome: "success" | "error";
@@ -78,7 +81,7 @@ export interface ClusterScene {
   clusterId: number;
   sceneKey: string;
   sceneType: string;
-  toolPath: Array<{ projectId: string; moduleId: string | null; toolName: string; operation: string | null }>;
+  toolPath: Array<{ projectId: string; moduleId: string | null; toolName: string; serviceVersionId: string | null; toolVersionId: string | null; operation: string | null }>;
   riskLevel: "low" | "medium" | "high";
   succeeded: boolean;
   occurredAt: Date;

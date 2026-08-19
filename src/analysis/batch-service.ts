@@ -2,7 +2,7 @@ import { averageVector, cosineSimilarity, sha256, sceneOf } from "./similarity.j
 import type { EmbeddingProvider } from "./embedding-provider.js";
 import type { ClusterJudge, QueryAssignmentDecision } from "./cluster-judge.js";
 import type { AnalysisRepository } from "./repository.js";
-import { NoopSkillCoverageResolver, defaultClusterDecisionSettings, defaultClusterThresholds, type AnalysisInput, type CandidateType, type ClusterDecisionSettings, type ClusterThresholds, type QueryCluster, type SkillCoverageResolver } from "./types.js";
+import { NoopSkillCoverageResolver, defaultClusterDecisionSettings, defaultClusterThresholds, type AnalysisInput, type CandidateEvent, type CandidateType, type ClusterDecisionSettings, type ClusterThresholds, type QueryCluster, type SkillCoverageResolver } from "./types.js";
 
 export interface BatchResult { locked: boolean; read: number; analyzed: number; skipped: number; failed: number; candidates: number; }
 
@@ -134,12 +134,16 @@ export class AnalysisBatchService {
     });
     await repository.appendScore(current.id,current.version,"cluster_quality",current.semanticCohesion,{ sampleCount:current.sampleCount,distinctActorCount:current.distinctActorCount,inputCompleteness:current.inputCompleteness,successRate:current.sampleCount?current.successCount/current.sampleCount:0,coverageGapCount:current.coverageGapCount });
     // 非语义兜底只用于影子观察。即使统计门槛碰巧满足，也不能把字面近似类别交给 L4。
-    const typeToSend = this.candidateHandoffEnabled && this.embeddings.candidateHandoffEnabled !== false && this.judge.candidateHandoffEnabled !== false ? candidateType(current,this.thresholds) : null;
+    const candidate = this.candidateHandoffEnabled && this.embeddings.candidateHandoffEnabled !== false && this.judge.candidateHandoffEnabled !== false ? candidateType(current,this.thresholds) : null;
+    const alreadyHandedOff = candidate ? (await repository.listOutbox()).some((event) => event.clusterId === current.id && event.candidateType === candidate) : false;
+    const typeToSend = alreadyHandedOff ? null : candidate;
     let handedOff = false;
     if (typeToSend) {
       const scenes = await repository.listScenes(current.id);
       const eventId = sha256(`l3-candidate\0${current.id}\0${current.version}\0${typeToSend}`);
-      handedOff = await repository.handOffCandidate(current.id,{eventId,clusterId:current.id,clusterVersion:current.version,candidateType:typeToSend,payload:{clusterKey:current.clusterKey,clusterType:current.clusterType,projectScope:current.projectScope,modulePath:current.modulePath,representativeQuery:current.representativeQuery,sampleCount:current.sampleCount,distinctActorCount:current.distinctActorCount,successRate:current.sampleCount?current.successCount/current.sampleCount:0,semanticCohesion:current.semanticCohesion,inputCompleteness:current.inputCompleteness,coverageGapCount:current.coverageGapCount,attemptedSkillCount:current.attemptedSkillCount,scenes}});
+      const representativeScene = scenes[0];
+      const candidate: CandidateEvent = { eventId, clusterId: current.id, clusterVersion: current.version, candidateType: typeToSend, payload: { clusterKey: current.clusterKey, clusterType: current.clusterType, projectScope: current.projectScope, modulePath: current.modulePath, representativeQuery: current.representativeQuery, sampleCount: current.sampleCount, distinctActorCount: current.distinctActorCount, successRate: current.sampleCount ? current.successCount / current.sampleCount : 0, semanticCohesion: current.semanticCohesion, inputCompleteness: current.inputCompleteness, coverageGapCount: current.coverageGapCount, attemptedSkillCount: current.attemptedSkillCount, toolPath: representativeScene?.toolPath ?? [], scenes } };
+      handedOff = await repository.handOffCandidate(current.id, candidate);
     }
     await repository.markAnalyzed(input.id, now);
     return { analyzed: true, skipped: false, candidate: handedOff };

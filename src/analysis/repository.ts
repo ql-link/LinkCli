@@ -20,8 +20,11 @@ export interface AnalysisRepository {
   appendScore(clusterId: number, clusterVersion: number, scoreType: string, scoreValue: number | null, reason: Record<string, unknown>): Promise<void>;
   handOffCandidate(clusterId: number, event: CandidateEvent): Promise<boolean>;
   markAnalyzed(inputId: number, analyzedAt: Date): Promise<void>;
-  listScenes(clusterId: number): Promise<Array<{ sceneType: string; sampleCount: number; successCount: number; riskLevel: string }>>;
+  listScenes(clusterId: number): Promise<Array<{ sceneType: string; sampleCount: number; successCount: number; riskLevel: string; toolPath: Array<{ projectId: string; moduleId: string | null; toolName: string; serviceVersionId: string | null; toolVersionId: string | null; operation: string | null }> }>>;
   listOutbox(): Promise<CandidateEvent[]>;
+  claimCandidateEvents(workerId: string, now: Date, leaseMs: number, limit: number): Promise<CandidateEvent[]>;
+  markCandidateDelivered(eventId: string, workerId: string, at: Date): Promise<boolean>;
+  markCandidateFailure(eventId: string, workerId: string, nextAttemptAt: Date, maxAttempts: number): Promise<boolean>;
   listClusters(): Promise<QueryCluster[]>;
 }
 
@@ -39,6 +42,7 @@ export class MemoryAnalysisRepository implements AnalysisRepository {
   private scenes = new Map<string, { scene: ClusterScene; sampleCount: number; successCount: number }>();
   private gaps: CoverageGap[] = [];
   private outbox: CandidateEvent[] = [];
+  private candidateDelivery = new Map<string, { status: "pending" | "delivering" | "delivered" | "dead"; attempts: number; owner: string | null; leaseUntil: Date | null; nextAttemptAt: Date }>();
   private nextInputId = 1;
   private nextClusterId = 1;
   private batchLocked = false;
@@ -46,14 +50,14 @@ export class MemoryAnalysisRepository implements AnalysisRepository {
   async transaction<T>(work: (repository: AnalysisRepository) => Promise<T>): Promise<T> {
     const snapshot = {
       inputs: clone(this.inputs), clusters: clone(this.clusters), members: clone(this.members),
-      scenes: clone([...this.scenes.entries()]), gaps: clone(this.gaps), outbox: clone(this.outbox),
+      scenes: clone([...this.scenes.entries()]), gaps: clone(this.gaps), outbox: clone(this.outbox), candidateDelivery: clone([...this.candidateDelivery.entries()]),
       nextInputId: this.nextInputId, nextClusterId: this.nextClusterId,
     };
     try {
       return await work(this);
     } catch (error) {
       this.inputs = snapshot.inputs; this.clusters = snapshot.clusters; this.members = snapshot.members;
-      this.scenes = new Map(snapshot.scenes); this.gaps = snapshot.gaps; this.outbox = snapshot.outbox;
+      this.scenes = new Map(snapshot.scenes); this.gaps = snapshot.gaps; this.outbox = snapshot.outbox; this.candidateDelivery = new Map(snapshot.candidateDelivery);
       this.nextInputId = snapshot.nextInputId; this.nextClusterId = snapshot.nextClusterId;
       throw error;
     }
@@ -153,15 +157,27 @@ export class MemoryAnalysisRepository implements AnalysisRepository {
   }
   async appendScore(_clusterId:number,_clusterVersion:number,_scoreType:string,_scoreValue:number|null,_reason:Record<string,unknown>): Promise<void> {}
   async handOffCandidate(clusterId: number, event: CandidateEvent): Promise<boolean> {
-    if (this.outbox.some((item) => item.eventId === event.eventId || (item.clusterId === event.clusterId && item.candidateType === event.candidateType))) return false;
+    if (this.outbox.some((item) => item.eventId === event.eventId || (item.clusterId === event.clusterId && item.clusterVersion === event.clusterVersion && item.candidateType === event.candidateType))) return false;
     const cluster = this.clusters.find((item) => item.id === clusterId); if (!cluster || !["observing","handed_off"].includes(cluster.status)) return false;
-    cluster.status = "handed_off"; this.outbox.push(clone(event)); return true;
+    cluster.status = "handed_off"; this.outbox.push(clone(event)); this.candidateDelivery.set(event.eventId, { status: "pending", attempts: 0, owner: null, leaseUntil: null, nextAttemptAt: new Date() }); return true;
   }
   async markAnalyzed(inputId: number, analyzedAt: Date): Promise<void> { const input = this.inputs.find((item) => item.id === inputId); if (input) input.analyzedAt = new Date(analyzedAt); }
-  async listScenes(clusterId: number): Promise<Array<{ sceneType: string; sampleCount: number; successCount: number; riskLevel: string }>> {
-    return [...this.scenes.values()].filter((item) => item.scene.clusterId === clusterId).map((item) => ({ sceneType: item.scene.sceneType, sampleCount: item.sampleCount, successCount: item.successCount, riskLevel: item.scene.riskLevel }));
+  async listScenes(clusterId: number): Promise<Array<{ sceneType: string; sampleCount: number; successCount: number; riskLevel: string; toolPath: Array<{ projectId: string; moduleId: string | null; toolName: string; serviceVersionId: string | null; toolVersionId: string | null; operation: string | null }> }>> {
+    return [...this.scenes.values()].filter((item) => item.scene.clusterId === clusterId).map((item) => ({ sceneType: item.scene.sceneType, sampleCount: item.sampleCount, successCount: item.successCount, riskLevel: item.scene.riskLevel, toolPath: clone(item.scene.toolPath) }));
   }
   async listOutbox(): Promise<CandidateEvent[]> { return clone(this.outbox); }
+  async claimCandidateEvents(workerId: string, now: Date, leaseMs: number, limit: number): Promise<CandidateEvent[]> {
+    const claimed: CandidateEvent[] = [];
+    for (const event of this.outbox) {
+      const state = this.candidateDelivery.get(event.eventId);
+      if (!state || state.nextAttemptAt > now || (state.status === "delivering" && state.leaseUntil && state.leaseUntil > now) || ["delivered", "dead"].includes(state.status)) continue;
+      state.status = "delivering"; state.owner = workerId; state.leaseUntil = new Date(now.getTime() + leaseMs); state.attempts++;
+      claimed.push(clone(event)); if (claimed.length >= limit) break;
+    }
+    return claimed;
+  }
+  async markCandidateDelivered(eventId: string, workerId: string, _at: Date): Promise<boolean> { const state = this.candidateDelivery.get(eventId); if (!state || state.status !== "delivering" || state.owner !== workerId) return false; state.status = "delivered"; state.owner = null; state.leaseUntil = null; return true; }
+  async markCandidateFailure(eventId: string, workerId: string, nextAttemptAt: Date, maxAttempts: number): Promise<boolean> { const state = this.candidateDelivery.get(eventId); if (!state || state.status !== "delivering" || state.owner !== workerId) return false; state.status = state.attempts >= maxAttempts ? "dead" : "pending"; state.owner = null; state.leaseUntil = null; state.nextAttemptAt = new Date(nextAttemptAt); return true; }
   async listClusters(): Promise<QueryCluster[]> { return clone(this.clusters); }
 }
 
@@ -238,9 +254,12 @@ export class MySqlAnalysisRepository implements AnalysisRepository {
   async addCoverageGap(gap:CoverageGap):Promise<boolean>{const [result]=await this.executor.execute<ResultSetHeader>("INSERT IGNORE INTO mcp_skill_coverage_gap (cluster_id,analysis_input_id,attempted_skill_id,attempted_skill_version,gap_type,evidence) VALUES (?,?,?,?,?,?)",[gap.clusterId,gap.analysisInputId,gap.attemptedSkillId,gap.attemptedSkillVersion,gap.gapType,JSON.stringify(gap.evidence)]);return result.affectedRows===1;}
   async recalculateCluster(clusterId:number):Promise<QueryCluster>{await this.executor.execute(`UPDATE mcp_query_cluster c SET sample_count=(SELECT COUNT(*) FROM mcp_query_cluster_member m WHERE m.cluster_id=c.id AND m.threshold_eligible=1),distinct_actor_count=(SELECT COUNT(DISTINCT i.actor_hash) FROM mcp_query_cluster_member m JOIN mcp_analysis_input i ON i.id=m.analysis_input_id WHERE m.cluster_id=c.id),success_count=(SELECT COUNT(*) FROM mcp_query_cluster_member m WHERE m.cluster_id=c.id AND m.quality_success=1),coverage_gap_count=(SELECT COUNT(*) FROM mcp_skill_coverage_gap g WHERE g.cluster_id=c.id),attempted_skill_count=(SELECT COUNT(*) FROM mcp_query_cluster_member m JOIN mcp_analysis_input i ON i.id=m.analysis_input_id WHERE m.cluster_id=c.id AND i.attempted_skill_id IS NOT NULL),semantic_cohesion=(SELECT COALESCE(AVG(m.semantic_similarity),0) FROM mcp_query_cluster_member m WHERE m.cluster_id=c.id),input_completeness=(SELECT COALESCE(AVG(i.collection_trust='trusted' AND (c.cluster_type='uncovered' OR i.module_path_hash IS NOT NULL)),0) FROM mcp_query_cluster_member m JOIN mcp_analysis_input i ON i.id=m.analysis_input_id WHERE m.cluster_id=c.id),first_seen_at=(SELECT MIN(i.occurred_at) FROM mcp_query_cluster_member m JOIN mcp_analysis_input i ON i.id=m.analysis_input_id WHERE m.cluster_id=c.id),last_seen_at=(SELECT MAX(i.occurred_at) FROM mcp_query_cluster_member m JOIN mcp_analysis_input i ON i.id=m.analysis_input_id WHERE m.cluster_id=c.id),version=version+1 WHERE c.id=?`,[clusterId]);const [rows]=await this.executor.query<RowDataPacket[]>(`SELECT c.*,i.query_text representative_query FROM mcp_query_cluster c JOIN mcp_analysis_input i ON i.event_id=c.representative_event_id WHERE c.id=?`,[clusterId]);if(!rows[0])throw new Error(`Cluster not found: ${clusterId}`);return clusterFrom(rows[0]);}
   async appendScore(clusterId:number,clusterVersion:number,scoreType:string,scoreValue:number|null,reason:Record<string,unknown>):Promise<void>{await this.executor.execute("INSERT INTO mcp_cluster_score_history (cluster_id,cluster_version,score_type,score_value,reason) VALUES (?,?,?,?,?)",[clusterId,clusterVersion,scoreType,scoreValue,JSON.stringify(reason)]);}
-  async handOffCandidate(clusterId:number,event:CandidateEvent):Promise<boolean>{const [clusters]=await this.executor.query<RowDataPacket[]>("SELECT status FROM mcp_query_cluster WHERE id=? FOR UPDATE",[clusterId]);if(!clusters[0]||!["observing","handed_off"].includes(String(clusters[0].status)))return false;const [existing]=await this.executor.query<RowDataPacket[]>("SELECT id FROM mcp_l4_candidate_outbox WHERE cluster_id=? AND candidate_type=? LIMIT 1",[clusterId,event.candidateType]);if(existing[0])return false;if(clusters[0].status!=="handed_off")await this.executor.execute("UPDATE mcp_query_cluster SET status='handed_off' WHERE id=?",[clusterId]);await this.executor.execute("INSERT INTO mcp_l4_candidate_outbox (event_id,cluster_id,cluster_version,candidate_type,payload) VALUES (?,?,?,?,?)",[event.eventId,event.clusterId,event.clusterVersion,event.candidateType,JSON.stringify(event.payload)]);return true;}
+  async handOffCandidate(clusterId:number,event:CandidateEvent):Promise<boolean>{const [clusters]=await this.executor.query<RowDataPacket[]>("SELECT status FROM mcp_query_cluster WHERE id=? FOR UPDATE",[clusterId]);if(!clusters[0]||!["observing","handed_off"].includes(String(clusters[0].status)))return false;const [existing]=await this.executor.query<RowDataPacket[]>("SELECT id FROM mcp_l4_candidate_outbox WHERE cluster_id=? AND cluster_version=? AND candidate_type=? LIMIT 1",[clusterId,event.clusterVersion,event.candidateType]);if(existing[0])return false;if(clusters[0].status!=="handed_off")await this.executor.execute("UPDATE mcp_query_cluster SET status='handed_off' WHERE id=?",[clusterId]);await this.executor.execute("INSERT INTO mcp_l4_candidate_outbox (event_id,cluster_id,cluster_version,candidate_type,payload) VALUES (?,?,?,?,?)",[event.eventId,event.clusterId,event.clusterVersion,event.candidateType,JSON.stringify(event.payload)]);return true;}
   async markAnalyzed(inputId:number,analyzedAt:Date):Promise<void>{await this.executor.execute("UPDATE mcp_analysis_input SET analyzed_at=? WHERE id=? AND analyzed_at IS NULL",[analyzedAt,inputId]);}
-  async listScenes(clusterId:number):Promise<Array<{sceneType:string;sampleCount:number;successCount:number;riskLevel:string}>>{const [rows]=await this.executor.query<RowDataPacket[]>("SELECT scene_type,sample_count,success_count,risk_level FROM mcp_query_cluster_scene WHERE cluster_id=? ORDER BY sample_count DESC",[clusterId]);return rows.map((row)=>({sceneType:row.scene_type,sampleCount:Number(row.sample_count),successCount:Number(row.success_count),riskLevel:row.risk_level}));}
+  async listScenes(clusterId:number):Promise<Array<{sceneType:string;sampleCount:number;successCount:number;riskLevel:string;toolPath:Array<{projectId:string;moduleId:string|null;toolName:string;serviceVersionId:string|null;toolVersionId:string|null;operation:string|null}>}>>{const [rows]=await this.executor.query<RowDataPacket[]>("SELECT scene_type,sample_count,success_count,risk_level,tool_path FROM mcp_query_cluster_scene WHERE cluster_id=? ORDER BY sample_count DESC",[clusterId]);return rows.map((row)=>({sceneType:row.scene_type,sampleCount:Number(row.sample_count),successCount:Number(row.success_count),riskLevel:row.risk_level,toolPath:parseJson(row.tool_path)}));}
   async listOutbox():Promise<CandidateEvent[]>{const [rows]=await this.executor.query<RowDataPacket[]>("SELECT event_id,cluster_id,cluster_version,candidate_type,payload FROM mcp_l4_candidate_outbox ORDER BY id");return rows.map((row)=>({eventId:row.event_id,clusterId:Number(row.cluster_id),clusterVersion:Number(row.cluster_version),candidateType:row.candidate_type,payload:parseJson(row.payload)}));}
+  async claimCandidateEvents(workerId:string,now:Date,leaseMs:number,limit:number):Promise<CandidateEvent[]>{if(this.pool)return this.transaction((repository)=>repository.claimCandidateEvents(workerId,now,leaseMs,limit));const [rows]=await this.executor.query<RowDataPacket[]>("SELECT event_id,cluster_id,cluster_version,candidate_type,payload FROM mcp_l4_candidate_outbox WHERE next_attempt_at<=? AND (status='pending' OR (status='delivering' AND (lease_until IS NULL OR lease_until<=?))) ORDER BY id LIMIT ? FOR UPDATE SKIP LOCKED",[now,now,limit]);if(!rows.length)return[];const ids=rows.map((row)=>row.event_id);await this.executor.execute(`UPDATE mcp_l4_candidate_outbox SET status='delivering',lease_owner=?,lease_until=?,attempt_count=attempt_count+1,updated_at=? WHERE event_id IN (${ids.map(()=>"?").join(",")})`,[workerId,new Date(now.getTime()+leaseMs),now,...ids]);return rows.map((row)=>({eventId:row.event_id,clusterId:Number(row.cluster_id),clusterVersion:Number(row.clusterVersion??row.cluster_version),candidateType:row.candidate_type,payload:parseJson(row.payload)}));}
+  async markCandidateDelivered(eventId:string,workerId:string,at:Date):Promise<boolean>{const [result]=await this.executor.execute<ResultSetHeader>("UPDATE mcp_l4_candidate_outbox SET status='delivered',delivered_at=?,lease_owner=NULL,lease_until=NULL,updated_at=? WHERE event_id=? AND status='delivering' AND lease_owner=?",[at,at,eventId,workerId]);return result.affectedRows===1;}
+  async markCandidateFailure(eventId:string,workerId:string,nextAttemptAt:Date,maxAttempts:number):Promise<boolean>{const [result]=await this.executor.execute<ResultSetHeader>("UPDATE mcp_l4_candidate_outbox SET status=IF(attempt_count>=?,'dead','pending'),next_attempt_at=?,lease_owner=NULL,lease_until=NULL,last_error_code='L4_CANDIDATE_DELIVERY_FAILED',updated_at=CURRENT_TIMESTAMP(6) WHERE event_id=? AND status='delivering' AND lease_owner=?",[maxAttempts,nextAttemptAt,eventId,workerId]);return result.affectedRows===1;}
   async listClusters():Promise<QueryCluster[]>{const [rows]=await this.executor.query<RowDataPacket[]>(`SELECT c.*,i.query_text representative_query FROM mcp_query_cluster c JOIN mcp_analysis_input i ON i.event_id=c.representative_event_id ORDER BY c.id`);return rows.map(clusterFrom);}
 }

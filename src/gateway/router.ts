@@ -30,6 +30,7 @@ export class GatewayRouter {
   ) {}
 
   async call(publicName: string, arguments_: JsonObject, context: CallContext): Promise<ToolCallResult> {
+    if (await this.catalog.isSkill(publicName)) return this.catalog.callSkill(publicName, arguments_, context);
     const credentialId = context.credentialId;
     const transportSessionId = context.transportSessionId;
     const attribution = resolveAttribution({ credentialId, transportSessionId, transportSessionSource: context.transportSessionSource, arguments: arguments_, meta: context.meta, fingerprintKey: this.fingerprintKey });
