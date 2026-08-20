@@ -1,4 +1,4 @@
-import { ArrowUpRight, Key, Layout, SignOut, Stack, UserCircle, Users, Wrench } from "@phosphor-icons/react";
+import { ArrowUpRight, ChartLineUp, CirclesThreePlus, FlowArrow, Key, Layout, SignOut, Stack, UserCircle, Users, Wrench } from "@phosphor-icons/react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { api, json } from "../api/client";
 import type { User } from "../api/types";
@@ -6,6 +6,9 @@ import type { User } from "../api/types";
 const links = [
   { to: "/", label: "工作台", icon: Layout, roles: ["member", "reviewer", "operator"] },
   { to: "/projects", label: "MCP 项目", icon: Stack, roles: ["member", "reviewer", "operator"] },
+  { to: "/statistics", label: "调用与轮次", icon: ChartLineUp, roles: ["member", "reviewer", "operator"] },
+  { to: "/analysis", label: "需求聚类", icon: CirclesThreePlus, roles: ["member", "reviewer", "operator"] },
+  { to: "/skills", label: "Skill 闭环", icon: FlowArrow, roles: ["member", "reviewer", "operator"] },
   { to: "/reviews", label: "审核队列", icon: Wrench, roles: ["reviewer"] },
   { to: "/credentials", label: "调用凭据", icon: Key, roles: ["member", "reviewer", "operator"] },
   { to: "/users", label: "用户与角色", icon: Users, roles: ["operator"] },
@@ -52,10 +55,15 @@ export function PageHeader({ eyebrow, title, description, action }: { eyebrow: s
 }
 
 export function Status({ value }: { value: string }) {
-  const labels: Record<string, string> = { active: "运行中", healthy: "健康", unhealthy: "异常", unknown: "未知", pending: "待处理", pending_review: "待审核", approved: "已批准", rejected: "已驳回", disabled: "已停用", retired: "已下线", draft: "草稿", member: "成员", reviewer: "审核员", operator: "管理员", revoked: "已吊销", expired: "已过期", low: "低风险", medium: "中风险", high: "高风险", added: "新增", removed: "移除", changed: "变更" };
+  const labels: Record<string, string> = { active: "运行中", healthy: "健康", unhealthy: "异常", unknown: "未知", pending: "待处理", running: "执行中", completed: "已完成", dead: "已死信", passed: "已通过", insufficient: "无法判定", cluster_error: "类别错误", pending_review: "待审核", approved: "已批准", rejected: "已驳回", disabled: "已停用", retired: "已下线", draft: "草稿", member: "成员", reviewer: "审核员", operator: "管理员", revoked: "已吊销", expired: "已过期", low: "低风险", medium: "中风险", high: "高风险", added: "新增", removed: "移除", changed: "变更", trusted:"可信", inferred:"推断", suspicious:"可疑", missing:"缺失", partial:"部分", succeeded:"已结算", failed:"失败", success:"成功", error:"错误", normal:"正常路径", uncovered:"未覆盖", observing:"观察中", handed_off:"已交接", merged:"已合并", validating:"验证中", canary:"灰度中", paused:"已暂停", degraded:"已降级", new_skill:"新 Skill", expand_skill:"扩展 Skill", uncovered_demand:"未覆盖需求" };
   return <span className={`status ${value}`}>{labels[value] ?? value.replaceAll("_", " ")}</span>;
 }
 
 export function Empty({ title, description }: { title: string; description: string }) {
   return <div className="panel grid min-h-64 place-items-center p-10 text-center"><div className="max-w-sm"><span className="mx-auto mb-5 grid h-11 w-11 place-items-center rounded-[10px] bg-[#eeeef0]"><ArrowUpRight size={18} /></span><h2 className="text-lg font-semibold">{title}</h2><p className="mt-2 text-sm leading-6 text-[#6e6e73]">{description}</p></div></div>;
+}
+
+export function LoadError({ error, onRetry }: { error: unknown; onRetry: () => void }) {
+  const message = error instanceof Error ? error.message : "请求失败，请稍后重试。";
+  return <div className="panel grid min-h-64 place-items-center p-10 text-center"><div className="max-w-sm"><h2 className="text-lg font-semibold">数据加载失败</h2><p className="mt-2 text-sm leading-6 text-red-600">{message}</p><button className="btn-secondary mt-5" onClick={onRetry}>重新加载</button></div></div>;
 }

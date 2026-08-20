@@ -4,6 +4,7 @@ import { DeterministicSkillGenerator } from "../src/skill/generator.js";
 import { SkillService } from "../src/skill/service.js";
 import { SkillValidationRunner } from "../src/skill/validation.js";
 import type { AuthorityChecker, SkillCaseExecutor } from "../src/skill/types.js";
+import { SkillValidationWorker } from "../src/skill/validation-worker.js";
 
 const candidate = { eventId: "event-1", clusterId: 7, clusterVersion: 2, candidateType: "new_skill" as const, payload: { representativeQuery: "查找合同", toolPath: [{ projectId: "project-1", serviceVersionId: "version-1", toolVersionId: "tool-1", toolName: "search" }] } };
 
@@ -23,6 +24,20 @@ describe("SkillService", () => {
     const run = await service.validate(skill.id, "generation");
     expect(run.verdict).toBe("insufficient");
     expect((await service.get(skill.id)).status).toBe("validating");
+  });
+
+  it("returns the persisted active job and allows the same manual trigger after completion", async () => {
+    const repository = new MemorySkillRepository();
+    const service = new SkillService(repository);
+    const skill = await service.receiveCandidate(candidate);
+    const first = await service.enqueueValidation(skill.id, "manual");
+    const duplicate = await service.enqueueValidation(skill.id, "manual");
+    expect(duplicate.id).toBe(first.id);
+    const worker = new SkillValidationWorker(repository, service, { batchSize: 1, leaseMs: 1000, maxAttempts: 1, retryBaseMs: 1 });
+    expect(await worker.drainOnce(new Date(Date.now() + 1))).toMatchObject({ claimed: 1, completed: 1 });
+    const second = await service.enqueueValidation(skill.id, "manual", new Date(Date.now() + 2));
+    expect(second.id).not.toBe(first.id);
+    expect((await repository.listValidationJobs(skill.id)).map((job) => job.status)).toEqual(["pending", "completed"]);
   });
 
   it("requires review and canary before activation after a passed validation", async () => {

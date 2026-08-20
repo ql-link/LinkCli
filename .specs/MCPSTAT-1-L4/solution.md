@@ -194,7 +194,7 @@ stateDiagram-v2
 第一阶段落地为“生命周期核心 + 管理入口 + 可替换执行适配器”，以候选事件为唯一自动生成入口：
 
 - `src/skill/types.ts` 定义 `Skill`、不可变 `SkillVersion`、固定验证样本、验证运行和生命周期状态。版本保存来源 `clusterId/clusterVersion`、依赖 Tool 版本快照和生成模型标识，禁止原地覆盖。
-- `src/skill/repository.ts` 提供 `SkillRepository`，包含内存实现和 MySQL 实现；MySQL 表为 `mcp_skills`、`mcp_skill_versions`、`mcp_skill_validation_runs`、`mcp_skill_reviews`。状态变更使用期望版本号做乐观并发校验，验证运行以 `(skill_version_id, trigger, sample_set_hash)` 幂等。
+- `src/skill/repository.ts` 提供 `SkillRepository`，包含内存实现和 MySQL 实现；MySQL 表为 `mcp_skills`、`mcp_skill_versions`、`mcp_skill_validation_runs`、`mcp_skill_reviews`。状态变更使用期望版本号做乐观并发校验，验证运行以 `(skill_version_id, trigger, sample_set_hash)` 幂等。验证任务只对 `pending/running` 状态去重，完成或死信后允许同一版本因新的人工复核再次排队；并发重复请求返回当前活动任务，不得返回未落库的任务标识。
 - `src/skill/generator.ts` 提供 `SkillGenerator` 接口和安全的确定性默认实现。默认实现只根据 L3 脱敏候选载荷生成结构化草稿，不调用外部模型；接入真实 AI 时必须实现同一接口并返回可校验的步骤、输入映射和输出契约。
 - `src/skill/validation.ts` 提供固定样本执行器与 `AuthorityChecker` 接口。验证只由 `generate`、`revision`、依赖 Tool 变更/运行异常、人工复核触发；普通 L1 Query/Tool 调用不会进入该执行器。没有配置权威库适配器时，结果为 `insufficient`，不能进入灰度或启用。
 - `src/skill/service.ts` 编排候选接收、草稿生成、验证、提交审核、审核决定、灰度、启用、暂停、降级和废弃，并拒绝非法状态迁移。`receiveCandidate` 对 `(clusterId, clusterVersion, candidateType)` 做幂等，保证同一 L3 类别不会重复生成。
@@ -205,7 +205,9 @@ stateDiagram-v2
 
 ### 完整闭环实现补充
 
-当前实现已经补齐以下运行闭环：L3 候选 outbox 使用消费者租约、重试和死信状态交给 `SkillCandidateWorker`；候选场景携带 L1 的 `serviceVersionId/toolVersionId` 不可变快照，按类别版本和候选类型幂等；Skill 首次生成、修订、依赖变更和人工复核统一进入 `mcp_skill_validation_jobs`，由 `SkillValidationWorker` 异步执行；验证结论写入 `mcp_l4_validation_feedback`。
+当前实现已经补齐以下运行闭环：L3 候选 outbox 使用消费者租约、重试和死信状态交给 `SkillCandidateWorker`；候选场景携带 L1 的 `serviceVersionId/toolVersionId` 不可变快照，按类别版本和候选类型幂等；Skill 首次生成、修订、依赖变更和人工复核统一进入 `mcp_skill_validation_jobs`，由 `SkillValidationWorker` 异步执行；验证结论只写入 `mcp_skill_validation_runs`。该运行记录已经包含 Skill、不可变版本、结论、回放摘要和数据库核对摘要，并可经 `mcp_skills.source_cluster_id/source_cluster_version` 追溯 L3 来源，因此不再复制一张 L4 反馈表。控制台 Skill 详情必须同时展示验证任务状态和验证运行历史；活动任务期间自动刷新，运营者能够看到排队、执行、完成、死信、结论、回放摘要和数据库核对摘要。
+
+旧 `mcp_l4_validation_feedback` 清理前，迁移必须按 Skill、不可变 Skill 版本、来源类别及版本、结论、回放摘要和数据库核对摘要确认其与 `mcp_skill_validation_runs` 语义等价；任一反馈无法精确映射时拒绝删除旧表。迁移可重复执行，失败不得以“存在同结论记录”为由继续进行不可逆清理。
 
 已启用的 Skill 通过 `SkillRuntime` 作为 `skill__<skillKey>` 暴露到 MCP `tools/list`，调用时按固定步骤解析输入映射、绑定不可变 Tool 版本并顺序执行；任一步失败即停止且不重试。灰度状态按 `credentialId + skillId` 的稳定哈希和 `exposurePercent` 分流，未命中灰度的调用不执行。每个内部步骤写入 L2 的 `skill_id`、`skill_version_id`、`skill_run_id` 和 `skill_step_id`，继续沿用原有 L2/L3 结算链路。
 

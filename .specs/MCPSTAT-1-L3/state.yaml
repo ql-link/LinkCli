@@ -8,7 +8,7 @@ artifacts:
   solution:
     file: solution.md
     frozen: true
-    sha256: f01193c34399c51548d5262865a500c1199425b2b38d7680b4c8391440b9296b
+    sha256: f099944c7b8b4c02f49f767850308109760c32a28b00b276a921480a22091f8e
   acceptance:
     file: acceptance.feature
     frozen: false
@@ -18,21 +18,21 @@ verification:
   commands:
   - command: npm run check
     exit_code: 0
-    duration_ms: 8369
-    finished_at: '2026-08-14T13:36:34+00:00'
+    duration_ms: 13919
+    finished_at: '2026-08-20T06:36:20+00:00'
   code_snapshot:
-    sha256: 395a7c717f7139866ffa8337b83f3dbff8ee013103719c205e7abdf3168f2864
-    file_count: 138
-    head: 2100938d2b5bae79f9a5f89b9fc791b69db39879
-    captured_at: '2026-08-14T13:36:34+00:00'
+    sha256: 68faf77e3745c17aba24c36b9d4dc1ee06a5b8d5ac5dca083e1fb7ce3ee42a66
+    file_count: 164
+    head: c00c3d42f33536bb24717dbfd77d06ba30b72775
+    captured_at: '2026-08-20T06:36:20+00:00'
   manual_acceptance: null
-  verified_at: '2026-08-14T13:36:34+00:00'
+  verified_at: '2026-08-20T06:36:20+00:00'
 quality_review:
   passed: true
   evidence:
-  - 关键路径审查无阻断问题：Embedding 仅召回，Judge 越界与失败关闭，周期合并需 Judge 确认，L4 投递默认关闭；npm run check
-    110 项通过，6 项真实数据库测试按配置跳过
-  code_snapshot_sha256: 395a7c717f7139866ffa8337b83f3dbff8ee013103719c205e7abdf3168f2864
-  reviewed_at: '2026-08-14T13:37:21+00:00'
+  - 代码审查通过：候选去重改为状态感知，在线质心更新移除成员全量扫描；npm run check 通过，126 tests passed / 8 MySQL tests
+    safely skipped，API 与 Web 构建通过。
+  code_snapshot_sha256: 68faf77e3745c17aba24c36b9d4dc1ee06a5b8d5ac5dca083e1fb7ce3ee42a66
+  reviewed_at: '2026-08-20T06:36:56+00:00'
 created_at: '2026-08-12T16:50:17+00:00'
-updated_at: '2026-08-14T13:37:21+00:00'
+updated_at: '2026-08-20T06:36:56+00:00'

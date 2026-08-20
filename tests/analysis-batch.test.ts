@@ -62,6 +62,10 @@ class RecordingAnalysisRepository extends MemoryAnalysisRepository {
   }
 }
 
+class OnlineCostAnalysisRepository extends MemoryAnalysisRepository {
+  override async listMemberVectors(): Promise<number[][]> { throw new Error("online assignment must not scan all member vectors"); }
+}
+
 const embeddings = new TestEmbeddingProvider();
 const judge = new TestClusterJudge();
 
@@ -189,6 +193,23 @@ describe("L3 scheduled Query clustering", () => {
     await consumer.accept(turn("gap","a2","查询用户信息后删除订单",[call(1,"user","lookup","query"),call(2,"order","delete","delete")],at(2),{attemptedSkillId:"user-order-skill"}));
     expect((await new AnalysisBatchService(repository,embeddings,judge,thresholds,resolver).runBatch()).candidates).toBe(1);
     expect((await repository.listOutbox()).map((event)=>event.candidateType)).toEqual(["new_skill","expand_skill"]);
+  });
+
+  it("does not emit the same candidate type for every version while the cluster remains handed off", async () => {
+    const repository=new MemoryAnalysisRepository();const consumer=new AnalysisInputConsumer(repository);
+    const thresholds={...permissive,minimumSamples:1,minimumActors:1,minimumSpanMs:0,minimumSuccessRate:0};
+    await consumer.accept(turn("candidate-v1","a1","查询订单",[call(1,"order","query","query")],at(1)));
+    expect((await new AnalysisBatchService(repository,embeddings,judge,thresholds).runBatch()).candidates).toBe(1);
+    await consumer.accept(turn("candidate-v2","a2","查询订单",[call(1,"order","query","query")],at(2)));
+    expect((await new AnalysisBatchService(repository,embeddings,judge,thresholds).runBatch()).candidates).toBe(0);
+    expect((await repository.listOutbox()).map(event=>[event.clusterVersion,event.candidateType])).toEqual([[1,"new_skill"]]);
+  });
+
+  it("updates the online centroid without scanning every member vector", async () => {
+    const repository=new OnlineCostAnalysisRepository();const consumer=new AnalysisInputConsumer(repository);
+    await consumer.accept(turn("cost-1","a1","查询订单",[call(1,"order","query","query")],at(1)));
+    await consumer.accept(turn("cost-2","a2","查询订单",[call(1,"order","query","query")],at(2)));
+    expect(await new AnalysisBatchService(repository,embeddings,judge,{minimumSamples:99}).runBatch()).toMatchObject({analyzed:2,failed:0});
   });
 
   it("rolls back a failed input and continues the rest of the batch", async () => {

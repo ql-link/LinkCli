@@ -13,6 +13,8 @@ import { credentialView, diffTools, projectView, reviewView, toolView, userView,
 import { paginate } from "./pagination.js";
 import type { StatisticsService } from "../statistics/service.js";
 import { createStatisticsRouter } from "../statistics/http.js";
+import type { AnalysisRepository } from "../analysis/repository.js";
+import type { SkillService } from "../skill/service.js";
 
 const authSchema=z.object({username:z.string(),password:z.string()});
 const registerSchema=authSchema.extend({displayName:z.string()});
@@ -23,11 +25,14 @@ const reviewSchema=z.object({decision:z.enum(["approved","rejected"]),comment:z.
 const statusSchema=z.object({action:z.enum(["disable","enable","retire"])});
 const bypassSchema=z.object({enabled:z.boolean()});
 const credentialSchema=z.object({credentialName:z.string().min(1).max(120),expiresAt:z.string().datetime().nullable().optional()});
+const skillValidationSchema=z.object({trigger:z.enum(["generation","revision","dependency_change","runtime_anomaly","manual"])});
+const skillReviewSchema=z.object({decision:z.enum(["approved","rejected"]),comment:z.string().max(1000).nullable().optional()});
+const skillLifecycleSchema=z.object({action:z.enum(["activate","pause","resume","degrade","retire"]),reason:z.string().max(255).nullable().optional()});
 const page=(req:Request)=>({cursor:typeof req.query.cursor==="string"?req.query.cursor:undefined,limit:Math.min(100,Math.max(1,Number(req.query.limit)||20))});
 const canView=(user:PlatformUser,project:Project)=>user.id===project.ownerId||user.role==="reviewer"||user.role==="operator";
 const assertView=(user:PlatformUser,project:Project)=>{if(!canView(user,project))throw new AppError("AUTHORIZATION_FAILED","Project is not available to this account",403);};
 
-export interface ConsoleServices { identity:IdentityService; repository:RegistryRepository; projects:ProjectService; reviews:ReviewService; health:HealthMonitor; credentials:CredentialService; statistics?:StatisticsService; }
+export interface ConsoleServices { identity:IdentityService; repository:RegistryRepository; projects:ProjectService; reviews:ReviewService; health:HealthMonitor; credentials:CredentialService; statistics?:StatisticsService; analysis?:AnalysisRepository; skills?:SkillService; }
 
 class AttemptLimiter {
   private readonly entries=new Map<string,{count:number;resetAt:number}>();
@@ -44,6 +49,20 @@ export function createConsoleRouter(services:ConsoleServices, secureCookie:boole
   if (services.statistics) router.use("/statistics", createStatisticsRouter(services.statistics));
   router.get("/auth/session",(req,res)=>res.json({data:{user:userView(req.consoleUser!),session:{expiresAt:req.consoleSession!.expiresAt}}}));
   router.patch("/me",async(req,res,next)=>{try{const b=z.object({displayName:z.string()}).parse(req.body);res.json({data:{user:userView(await services.identity.updateDisplayName(req.consoleUser!.id,b.displayName))}});}catch(e){next(e);}});
+
+  const visibleClusters=async(user:PlatformUser)=>{if(!services.analysis)return[];const projects=await services.repository.listProjects();const visibleIds=new Set(projects.filter(project=>user.role!=="member"||project.ownerId===user.id).map(project=>project.id));return(await services.analysis.listClusters()).filter(cluster=>user.role!=="member"||(cluster.projectScope!==null&&cluster.projectScope.split("→").every(id=>visibleIds.has(id))));};
+  if(services.analysis){
+    router.get("/analysis/clusters",async(req,res,next)=>{try{const rows=(await visibleClusters(req.consoleUser!)).sort((a,b)=>b.lastSeenAt.getTime()-a.lastSeenAt.getTime());res.json({data:rows.map(({centroidVector:_vector,...cluster})=>cluster)});}catch(e){next(e);}});
+    router.get("/analysis/clusters/:id",async(req,res,next)=>{try{const id=Number(req.params.id);const cluster=(await visibleClusters(req.consoleUser!)).find(item=>item.id===id);if(!cluster)throw new AppError("NOT_FOUND","Query cluster not found",404);const [scenes,candidate]=await Promise.all([services.analysis!.listScenes(id),services.analysis!.findLatestCandidate(id)]);const{centroidVector:_vector,...view}=cluster;res.json({data:{cluster:view,scenes,candidate}});}catch(e){next(e);}});
+  }
+  if(services.skills){
+    const visibleSkills=async(user:PlatformUser)=>{const rows=await services.skills!.list();if(user.role!=="member")return rows;const clusterIds=new Set((await visibleClusters(user)).map(cluster=>cluster.id));return rows.filter(skill=>clusterIds.has(skill.sourceClusterId));};
+    router.get("/skills",async(req,res,next)=>{try{res.json({data:await visibleSkills(req.consoleUser!)});}catch(e){next(e);}});
+    router.get("/skills/:id",async(req,res,next)=>{try{const id=String(req.params.id);if(!(await visibleSkills(req.consoleUser!)).some(skill=>skill.id===id))throw new AppError("NOT_FOUND","Skill not found",404);res.json({data:await services.skills!.detail(id)});}catch(e){next(e);}});
+    router.post("/skills/:id/validate",requireConsoleRole(["operator"]),async(req,res,next)=>{try{const body=skillValidationSchema.parse(req.body);res.status(202).json({data:{job:await services.skills!.enqueueValidation(String(req.params.id),body.trigger)}});}catch(e){next(e);}});
+    router.post("/skills/:id/review",requireConsoleRole(["reviewer"]),async(req,res,next)=>{try{const body=skillReviewSchema.parse(req.body);res.json({data:await services.skills!.decideReview(String(req.params.id),body.decision,req.consoleUser!.id,body.comment??null)});}catch(e){next(e);}});
+    router.post("/skills/:id/lifecycle",requireConsoleRole(["operator"]),async(req,res,next)=>{try{const body=skillLifecycleSchema.parse(req.body);res.json({data:{skill:await services.skills!.lifecycle(String(req.params.id),body.action,body.reason??null)}});}catch(e){next(e);}});
+  }
 
   router.get("/dashboard",async(req,res,next)=>{try{const user=req.consoleUser!;let projects=(await services.repository.listProjects()).filter(p=>user.role==="operator"||p.ownerId===user.id);const versions=(await Promise.all(projects.map(p=>services.repository.listVersions(p.id)))).flat();const credentials=await services.credentials.list(user.id);const pending=user.role==="reviewer"?(await Promise.all((await services.repository.listProjects()).map(p=>services.repository.listVersions(p.id)))).flat().filter(v=>v.reviewStatus==="pending_review"&&v.submittedBy!==user.id):[];const now=Date.now();res.json({data:{projects:{total:projects.length,active:projects.filter(p=>p.status==="active").length,unhealthy:projects.filter(p=>p.healthStatus==="unhealthy").length,pending:projects.filter(p=>p.status==="pending").length},reviews:user.role==="reviewer"?{pending:pending.length,stale:pending.filter(v=>v.submittedAt&&now-v.submittedAt.getTime()>7*86400000).length}:null,credentials:{active:credentials.filter(c=>!c.revokedAt&&(!c.expiresAt||c.expiresAt.getTime()>now)).length,expiringWithinSevenDays:credentials.filter(c=>!c.revokedAt&&c.expiresAt&&c.expiresAt.getTime()>now&&c.expiresAt.getTime()<now+7*86400000).length},attention:[...projects.filter(p=>p.healthStatus==="unhealthy").map(p=>({type:"unhealthy_project",id:p.id,title:p.displayName,description:"项目最近探活不健康",href:`/projects/${p.projectKey}`,occurredAt:(p.lastHealthCheckedAt??p.updatedAt).toISOString()})),...pending.slice(0,5).map(v=>({type:"pending_review",id:v.id,title:`待审核版本 v${v.versionNo}`,description:"候选版本等待审核",href:`/versions/${v.id}`,occurredAt:(v.submittedAt??v.createdAt).toISOString()}))].slice(0,8)}});}catch(e){next(e);}});
 

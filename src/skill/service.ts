@@ -18,6 +18,16 @@ export class SkillService {
 
   async list(): Promise<Awaited<ReturnType<SkillRepository["listSkills"]>>> { return this.repository.listSkills(); }
   async get(id: string) { return assertFound(await this.repository.getSkill(id), "Skill not found"); }
+  async detail(id: string) {
+    const skill = await this.get(id);
+    const [version, review, validationRuns, validationJobs] = await Promise.all([
+      skill.currentVersionId ? this.repository.getVersion(skill.currentVersionId) : null,
+      skill.currentVersionId ? this.repository.getReview(skill.currentVersionId) : null,
+      this.repository.listValidationRuns(skill.id),
+      this.repository.listValidationJobs(skill.id),
+    ]);
+    return { skill, version, review, validationRuns, validationJobs };
+  }
 
   async receiveCandidate(candidate: SkillCandidate) {
     const existing = await this.repository.findBySource(candidate.clusterId, candidate.clusterVersion, candidate.candidateType);
@@ -69,8 +79,11 @@ export class SkillService {
     const skill = await this.get(skillId);
     const version = assertFound(skill.currentVersionId ? await this.repository.getVersion(skill.currentVersionId) : null, "Skill version not found");
     const job: SkillValidationJob = { id: randomUUID(), skillId, skillVersionId: version.id, trigger, status: "pending", attempts: 0, nextAttemptAt: at, leaseOwner: null, leaseUntil: null, lastError: null, createdAt: at, updatedAt: at };
-    await this.repository.enqueueValidation(job);
-    return job;
+    if (await this.repository.enqueueValidation(job)) return job;
+    const active = await this.repository.findActiveValidationJob(version.id, trigger);
+    if (active) return active;
+    if (await this.repository.enqueueValidation(job)) return job;
+    return assertFound(await this.repository.findActiveValidationJob(version.id, trigger), "Active validation job not found after a concurrent enqueue");
   }
 
   async submitReview(skillId: string, actorId: string) {

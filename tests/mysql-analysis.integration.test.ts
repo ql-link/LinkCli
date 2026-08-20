@@ -21,7 +21,7 @@ async function reset(pool:Pool):Promise<void>{
     const [[identity]]=await connection.query<mysql.RowDataPacket[]>("SELECT DATABASE() name"); const name=String(identity?.name??"");
     if(!/(?:_dev|_test)$/.test(name))throw new Error(`Refusing to reset non-test database: ${name}`);
     await connection.query("SET FOREIGN_KEY_CHECKS=0");
-    try{for(const table of ["mcp_l4_validation_feedback","mcp_l4_candidate_outbox","mcp_cluster_score_history","mcp_skill_coverage_gap","mcp_query_cluster_scene","mcp_query_cluster_member","mcp_query_cluster","mcp_analysis_input"])await connection.query(`TRUNCATE TABLE \`${table}\``);}
+    try{for(const table of ["mcp_l4_candidate_outbox","mcp_cluster_score_history","mcp_query_cluster_scene","mcp_query_cluster","mcp_analysis_input"])await connection.query(`TRUNCATE TABLE \`${table}\``);}
     finally{await connection.query("SET FOREIGN_KEY_CHECKS=1");}
   }finally{connection.release();}
 }

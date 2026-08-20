@@ -30,7 +30,6 @@ import { ReviewService } from "../src/registry/review-service.js";
 import { ProjectCredentialCipher } from "../src/security/project-credential.js";
 import { SkillCandidateWorker } from "../src/skill/candidate-worker.js";
 import { DeterministicSkillGenerator } from "../src/skill/generator.js";
-import { MySqlSkillFeedbackSink } from "../src/skill/feedback.js";
 import { MySqlSkillRepository } from "../src/skill/repository.js";
 import { SkillRuntime } from "../src/skill/runtime.js";
 import { SkillService } from "../src/skill/service.js";
@@ -94,7 +93,7 @@ async function reset(pool: Pool): Promise<void> {
     if (!/(?:_dev|_test)$/.test(name)) throw new Error(`Refusing to reset non-test database: ${name}`);
     await connection.query("SET FOREIGN_KEY_CHECKS=0");
     try {
-      for (const table of ["mcp_l4_validation_feedback", "mcp_skill_validation_jobs", "mcp_skill_reviews", "mcp_skill_validation_runs", "mcp_skill_versions", "mcp_skills", "mcp_l4_candidate_outbox", "mcp_cluster_score_history", "mcp_skill_coverage_gap", "mcp_query_cluster_scene", "mcp_query_cluster_member", "mcp_query_cluster", "mcp_analysis_input", "mcp_analysis_outbox", "mcp_call_events", "mcp_turns", "mcp_call_outbox", "mcp_reviews", "mcp_tool_runtime", "mcp_tool_versions", "mcp_service_versions", "mcp_projects", "mcp_call_credentials"]) await connection.query(`TRUNCATE TABLE \`${table}\``);
+      for (const table of ["mcp_skill_validation_jobs", "mcp_skill_reviews", "mcp_skill_validation_runs", "mcp_skill_versions", "mcp_skills", "mcp_l4_candidate_outbox", "mcp_cluster_score_history", "mcp_query_cluster_scene", "mcp_query_cluster", "mcp_analysis_input", "mcp_analysis_outbox", "mcp_call_events", "mcp_turns", "mcp_call_outbox", "mcp_reviews", "mcp_tool_runtime", "mcp_tool_versions", "mcp_service_versions", "mcp_projects", "mcp_call_credentials"]) await connection.query(`TRUNCATE TABLE \`${table}\``);
     } finally { await connection.query("SET FOREIGN_KEY_CHECKS=1"); }
   } finally { connection.release(); }
 }
@@ -136,11 +135,11 @@ realMySqlDescribe("real MySQL L3 to L4 end-to-end", () => {
       const skillService = new SkillService(skillRepository, new DeterministicSkillGenerator(), new SkillValidationRunner(new ToolValidationExecutor(registry, connector, cipher, 5_000), authority));
       const candidateWorker = new SkillCandidateWorker(analysisRepository, skillService, { batchSize: 100, leaseMs: 30_000, maxAttempts: 3, retryBaseMs: 1 });
       expect(await candidateWorker.drainOnce(new Date())).toMatchObject({ claimed: 8, delivered: 8, failed: 0 });
-      const validationWorker = new SkillValidationWorker(skillRepository, skillService, { batchSize: 100, leaseMs: 30_000, maxAttempts: 3, retryBaseMs: 1 }, new MySqlSkillFeedbackSink(pool, skillRepository));
+      const validationWorker = new SkillValidationWorker(skillRepository, skillService, { batchSize: 100, leaseMs: 30_000, maxAttempts: 3, retryBaseMs: 1 });
       expect(await validationWorker.drainOnce(new Date())).toMatchObject({ claimed: 8, completed: 8, failed: 0 });
       for (const skill of await skillService.list()) { expect(skill.status).toBe("pending_review"); await skillService.decideReview(skill.id, "approved", "mysql-l4-reviewer", "validated"); await skillService.lifecycle(skill.id, "activate"); }
-      const [[feedback]] = await pool.query<mysql.RowDataPacket[]>("SELECT COUNT(*) AS count FROM mcp_l4_validation_feedback WHERE verdict='passed'");
-      expect(Number(feedback?.count)).toBe(8);
+      const [[validationRuns]] = await pool.query<mysql.RowDataPacket[]>("SELECT COUNT(*) AS count FROM mcp_skill_validation_runs WHERE verdict='passed'");
+      expect(Number(validationRuns?.count)).toBe(8);
 
       const credentials = new CredentialService(registry);
       const runtime = new SkillRuntime(skillService, registry, connector, cipher, health, collection, Buffer.alloc(32, 23), 5_000);

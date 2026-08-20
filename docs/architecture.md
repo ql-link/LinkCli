@@ -50,11 +50,11 @@ L2 结算成功后先写入 `mcp_analysis_outbox`。后台 Analysis Outbox Worke
 
 同一 `turn_id` 在批处理前到达更高结算版本时，旧版本被标记为已取代且不参与聚类；轮次已经分析后不接受静默改版，调用方必须发起显式补偿重建，避免旧成员、场景和频次残留在类别中。
 
-调度器默认每 5 分钟读取最多 1000 条未分析输入，并使用 MySQL advisory lock 避免多个 LinkCli 实例同时执行批次。正常输入按有序 `Project/Module` 组合限定候选范围，先用文本指纹去重，再用本地语义模型与类别语义中心比较；查询、修改、删除等 Tool 动作只形成组内场景，不作为 Query 类别硬边界。系统还需周期性执行合并与拆分检查，修正增量处理顺序带来的误差。单条输入失败时只回滚该输入并继续批次，失败记录保留到下一批重试。
+调度器默认每 5 分钟读取最多 1000 条未分析输入，并使用 MySQL advisory lock 避免多个 LinkCli 实例同时执行批次。正常输入按有序 `Project/Module` 组合限定候选范围，先用文本指纹去重，再用 Embedding 召回 Top-K 类别，由 `ClusterJudge` 阅读真实代表 Query 决定归类；查询、修改、删除等 Tool 动作只形成组内场景，不作为 Query 类别硬边界。在线路径增量更新质心，已有成员相似度的全量重算只在独立重建任务执行。单条输入失败时只回滚该输入并继续批次，失败记录保留到下一批重试。
 
-候选门槛由 `L3_*` 环境变量配置。没有尝试现有 Skill 且质量达标的类别产生 `new_skill`，明确存在覆盖缺口的类别产生 `expand_skill`，零调用类别产生 `uncovered_demand`。候选与类别状态在同一事务写入 `mcp_l4_candidate_outbox`；同一类别的同类候选只交付一次，但 `new_skill` 交付后仍可因后续覆盖缺口产生一次 `expand_skill`。L3 不生成 Skill、不调用业务 MCP，也不主动查询权威业务数据库；回放和数据库反向校验属于 L4。
+候选门槛由 `L3_*` 环境变量配置。没有尝试现有 Skill 且质量达标的类别产生 `new_skill`，明确存在覆盖缺口的类别产生 `expand_skill`，零调用类别产生 `uncovered_demand`。候选与类别状态在同一事务写入 `mcp_l4_candidate_outbox`；数据库幂等键为 `cluster_id + cluster_version + candidate_type`。类别保持 `handed_off` 时不会因样本增加和版本增长重复交付同类型候选；L4 反馈使类别重新进入观察状态后，新版本才可再次交付，不同候选类型不受此抑制。L3 不生成 Skill、不调用业务 MCP，也不主动查询权威业务数据库；回放和数据库反向校验属于 L4。
 
-空库通过 `npm run db:init` 创建全部表；已有数据库在启用调度器前运行 `npm run db:upgrade:analysis`。升级脚本只从 `src/db/schema.sql` 的 L3 标记位置读取并使用 `CREATE TABLE IF NOT EXISTS`，不维护第二份 DDL。
+空库通过 `npm run db:init` 创建全部表；已有数据库在启用调度器前运行 `npm run db:upgrade:analysis`。升级脚本以 `src/db/schema.sql` 为唯一 DDL 来源，并负责将旧的一对一分析表收敛到当前结构。旧 L4 反馈只有在来源类别、Skill 版本、结论和两份验证摘要与验证运行精确等价时才会删除，否则迁移拒绝继续。
 
 ## 已知运行限制
 
