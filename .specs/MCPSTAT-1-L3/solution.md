@@ -205,10 +205,10 @@ LLM 只能返回 Top-K 中已有的 `clusterId` 或 `null`，越界 ID、非结�
 
 **周期性复核（已冻结）**：`ClusterRebuildJob` 与在线归类使用相同的“Embedding 召回 + LLM 精判”边界：
 
-- 触发周期与批处理调度对齐但独立执行，避免长期占用成员表；
+- 触发周期与批处理调度对齐但独立执行，避免长期占用分析输入记录；
 - 对每个确定性桶按质心召回 Top-K 类别对，去重后按召回分数排序；
 - LLM 阅读两类真实代表 Query，返回 `sameDemand=true` 才执行事务合并，返回 false 或不确定则保留；
-- 合并后迁移成员、场景和覆盖缺口，重算质心与指标；高方差类别仍只标记人工拆分复核，不自动拆分；
+- 合并后迁移分析输入的类别归属并合并场景，重算质心、覆盖缺口与指标；高方差类别仍只标记人工拆分复核，不自动拆分；
 - 全过程写入 `mcp_cluster_score_history`，保留召回分数、Judge 模型版本、判断原因和触发批次。
 
 ### 6.4 第四步：场景归纳
@@ -318,14 +318,13 @@ stateDiagram-v2
 
 | 表 | 用途 |
 |---|---|
-| `mcp_analysis_input` | 幂等保存 L2 完整结算记录的分析索引 |
+| `mcp_analysis_input` | 幂等保存 L2 完整结算记录，并承载其唯一类别归属、相似度、向量及单一 attempted Skill 覆盖缺口 |
 | `mcp_query_cluster` | Query 类别主表及累计指标 |
-| `mcp_query_cluster_member` | 输入记录与类别的归属和相似度 |
 | `mcp_query_cluster_scene` | 类别下具体操作场景及稳定性指标 |
-| `mcp_skill_coverage_gap` | 已有 Skill 的覆盖缺口或误匹配证据 |
 | `mcp_cluster_score_history` | 可解释评分和状态变化历史 |
 | `mcp_l4_candidate_outbox` | 向 L4 可靠交付候选事件 |
-| `mcp_l4_validation_feedback` | L4 回流的回放和数据库校验结论 |
+
+数据模型收敛遵循业务基数而非机械拆表：当前约束下一条 `mcp_analysis_input` 只能归属一个 Query 类别，且 L2 只记录一个实际尝试的 Skill，因此类别成员与覆盖缺口都是分析输入的一对一扩展，直接并入输入表。L4 验证结论以 `mcp_skill_validation_runs` 为唯一事实源，L3 需要统计或定位 `cluster_error` 时通过 Skill 的来源 Cluster 关联查询，不复制到独立反馈表。评分历史、场景、候选 Outbox 仍分别是一对多审计事实、一对多聚合和可靠交付状态，不能并入类别主表。
 
 ### 10.2 建表草案
 
@@ -349,6 +348,16 @@ CREATE TABLE mcp_analysis_input (
     collection_trust ENUM('trusted','suspect','missing') NOT NULL,
     attempted_skill_id VARCHAR(191) NULL,
     attempted_skill_version VARCHAR(64) NULL,
+    cluster_id BIGINT UNSIGNED NULL,
+    semantic_similarity DECIMAL(6,5) NULL,
+    query_vector JSON NULL,
+    scene_type VARCHAR(512) NULL,
+    threshold_eligible TINYINT(1) NULL,
+    quality_success TINYINT(1) NULL,
+    exclusion_reason VARCHAR(64) NULL,
+    coverage_gap_type ENUM('not_covered','partial_coverage','mismatch','execution_failure') NULL,
+    coverage_gap_evidence JSON NULL,
+    clustered_at DATETIME(6) NULL,
     occurred_at DATETIME(3) NOT NULL,
     analyzed_at DATETIME(3) NULL,
     created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
@@ -356,7 +365,8 @@ CREATE TABLE mcp_analysis_input (
     UNIQUE KEY uk_analysis_input_event (event_id),
     UNIQUE KEY uk_analysis_input_turn_version (turn_id, settlement_version),
     KEY idx_analysis_input_path (project_scope, module_path_hash, occurred_at),
-    KEY idx_analysis_input_status (settlement_status, analyzed_at)
+    KEY idx_analysis_input_status (settlement_status, analyzed_at),
+    KEY idx_analysis_input_cluster (cluster_id, clustered_at, id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE mcp_query_cluster (
@@ -392,25 +402,9 @@ CREATE TABLE mcp_query_cluster (
         FOREIGN KEY (merged_into_cluster_id) REFERENCES mcp_query_cluster(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE mcp_query_cluster_member (
-    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-    cluster_id BIGINT UNSIGNED NOT NULL,
-    analysis_input_id BIGINT UNSIGNED NOT NULL,
-    semantic_similarity DECIMAL(6,5) NOT NULL,
-    query_vector JSON NULL COMMENT '该成员的 Query 向量，供质心增量重算和 ClusterRebuildJob 使用',
-    scene_type VARCHAR(191) NULL,
-    threshold_eligible TINYINT(1) NOT NULL DEFAULT 1,
-    quality_success TINYINT(1) NOT NULL DEFAULT 0,
-    exclusion_reason VARCHAR(64) NULL,
-    created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-    PRIMARY KEY (id),
-    UNIQUE KEY uk_cluster_member_input (analysis_input_id),
-    KEY idx_cluster_member_cluster (cluster_id, created_at),
-    CONSTRAINT fk_cluster_member_cluster
-        FOREIGN KEY (cluster_id) REFERENCES mcp_query_cluster(id),
-    CONSTRAINT fk_cluster_member_input
-        FOREIGN KEY (analysis_input_id) REFERENCES mcp_analysis_input(id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+ALTER TABLE mcp_analysis_input
+    ADD CONSTRAINT fk_analysis_input_cluster
+        FOREIGN KEY (cluster_id) REFERENCES mcp_query_cluster(id);
 
 CREATE TABLE mcp_query_cluster_scene (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -430,24 +424,6 @@ CREATE TABLE mcp_query_cluster_scene (
     UNIQUE KEY uk_cluster_scene (cluster_id, scene_key),
     CONSTRAINT fk_cluster_scene_cluster
         FOREIGN KEY (cluster_id) REFERENCES mcp_query_cluster(id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
-CREATE TABLE mcp_skill_coverage_gap (
-    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-    cluster_id BIGINT UNSIGNED NOT NULL,
-    analysis_input_id BIGINT UNSIGNED NOT NULL,
-    attempted_skill_id VARCHAR(191) NOT NULL,
-    attempted_skill_version VARCHAR(64) NULL,
-    gap_type ENUM('not_covered','partial_coverage','mismatch','execution_failure') NOT NULL,
-    evidence JSON NOT NULL,
-    created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-    PRIMARY KEY (id),
-    UNIQUE KEY uk_skill_gap_input_skill (analysis_input_id, attempted_skill_id),
-    KEY idx_skill_gap_cluster (cluster_id, created_at),
-    CONSTRAINT fk_skill_gap_cluster
-        FOREIGN KEY (cluster_id) REFERENCES mcp_query_cluster(id),
-    CONSTRAINT fk_skill_gap_input
-        FOREIGN KEY (analysis_input_id) REFERENCES mcp_analysis_input(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE mcp_cluster_score_history (
@@ -486,23 +462,6 @@ CREATE TABLE mcp_l4_candidate_outbox (
         FOREIGN KEY (cluster_id) REFERENCES mcp_query_cluster(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE mcp_l4_validation_feedback (
-    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-    feedback_id VARCHAR(64) NOT NULL,
-    cluster_id BIGINT UNSIGNED NOT NULL,
-    cluster_version BIGINT UNSIGNED NOT NULL,
-    skill_id VARCHAR(191) NULL,
-    skill_version VARCHAR(64) NULL,
-    verdict ENUM('passed','failed','insufficient','cluster_error') NOT NULL,
-    replay_summary JSON NULL,
-    database_check_summary JSON NULL,
-    created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-    PRIMARY KEY (id),
-    UNIQUE KEY uk_l4_feedback_id (feedback_id),
-    KEY idx_l4_feedback_cluster (cluster_id, created_at),
-    CONSTRAINT fk_l4_feedback_cluster
-        FOREIGN KEY (cluster_id) REFERENCES mcp_query_cluster(id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 ```
 
 ## 11. L3 与 L4 的交付契约
@@ -519,7 +478,7 @@ L3 发给 L4 的候选至少包含：
 - 未覆盖 Query 的代表样本和需求规模。
 - 可回查的证据 ID，不直接复制敏感参数或业务数据。
 
-候选投递使用 Transactional Outbox。L3 状态变更和 Outbox 写入必须在同一事务内完成，L4 按 `event_id` 幂等消费。
+候选投递使用 Transactional Outbox。L3 状态变更和 Outbox 写入必须在同一事务内完成，L4 按 `event_id` 幂等消费。数据库幂等边界固定为 `cluster_id + cluster_version + candidate_type`；类别保持 `handed_off` 时，同类型候选不会因每条新样本带来的版本增长而重复交付。只有 L4 反馈使类别重新进入观察状态后，新版本才允许再次交付同类型候选；候选类型发生变化时可立即交付。
 
 ## 12. 技术实现
 
@@ -546,6 +505,8 @@ L3 发给 L4 的候选至少包含：
 - L2 Outbox 消费使用租约和至少一次投递；输入写入成功但确认前崩溃时，重放由 L3 输入幂等键吸收。
 - 同一输入只能属于一个当前有效类别。
 - 类别成员写入、指标更新、状态变化和 Outbox 写入使用单事务。
+- 在线归类只增量更新质心和新成员相似度；已有成员的全量相似度重算进入独立重建任务，避免每条输入逐行改写整个类别。
+- 候选存在性使用带 `cluster_id + cluster_version + candidate_type` 条件的索引查询，不为单条输入读取完整 Outbox。
 - 单条输入使用独立数据库事务和连接；一条毒性输入回滚后不得污染同批后续输入。
 - 类别更新采用版本号乐观锁；并发冲突重新读取后计算。
 - 模型版本、阈值版本和模块快照版本必须随评分历史保存，保证结果可重放。
@@ -559,7 +520,8 @@ L3 发给 L4 的候选至少包含：
 - L2 投递不等待 L3 分析结果。
 - 单批 1000 条在下一调度周期前处理完成。
 - 积压恢复后可持续以入口峰值两倍速度追平。
-- 周期重算与在线增量任务隔离，不能长期锁住成员表。
+- 周期重算与在线增量任务隔离，不能长期锁住分析输入表。
+- 在线新增成员的数据库读写随单条输入保持常数级或对数级；不得随着类别成员数形成逐条全量更新。
 
 ## 13. 安全、可观测与运维
 
@@ -603,7 +565,7 @@ tests/
 3. 实现输入幂等、模块路径和基础数据表。
 4. 实现宽口径聚类、场景归纳和周期修正。
 5. 实现质量统计、覆盖缺口识别和候选门槛。
-6. 实现 L4 Outbox、验证反馈和重建能力。
+6. 实现 L4 Outbox、基于验证运行关联查询的结论回溯和重建能力。
 7. 完成真实 MySQL、并发、恢复和容量验证。
 
 ## 15. 测试与验收
@@ -628,6 +590,7 @@ tests/
 - 一次真实 MCP 调用完成 L2 结算后，Analysis Outbox 自动转换为一条字段可追溯的 L3 Input；进程重启和重复消费不重复计数。
 - 一条毒性输入回滚后，同批正常输入仍能完成分析并被标记。
 - 类别达到门槛时，状态变化与 Outbox 事件原子提交且只投递一次。
+- 同一类别同一版本同一候选类型只交付一次；类别保持已交付状态时抑制同类型重复候选，重新进入观察状态且版本增长后才允许再次交付。
 - L4 验证失败或判定聚类错误后，L3 能退回观察并保留原因。
 - 周期复核中 LLM 同意才合并、拒绝则保留；重建前后成员归属和统计结果可解释、可审计。
 

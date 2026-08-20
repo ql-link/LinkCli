@@ -30,7 +30,6 @@ import { SkillService } from "./skill/service.js";
 import { SkillCandidateWorker } from "./skill/candidate-worker.js";
 import { SkillRuntime } from "./skill/runtime.js";
 import { SkillValidationWorker } from "./skill/validation-worker.js";
-import { MySqlSkillFeedbackSink } from "./skill/feedback.js";
 import { NoopAuthorityChecker, SkillValidationRunner, ToolValidationExecutor } from "./skill/validation.js";
 
 async function main(): Promise<void> {
@@ -95,10 +94,10 @@ async function main(): Promise<void> {
   const rebuildJob = new ClusterRebuildJob(analysisRepository,clusterJudge,analysisThresholds,decisionSettings);
   const analysisOutboxWorker = new AnalysisOutboxWorker(pool, analysisInputConsumer, { batchSize:config.COLLECTION_WORKER_BATCH_SIZE,leaseMs:config.COLLECTION_LEASE_MS,maxAttempts:config.COLLECTION_MAX_DELIVERY_ATTEMPTS,retryBaseMs:config.COLLECTION_WORKER_INTERVAL_MS });
   const skillCandidateWorker = new SkillCandidateWorker(analysisRepository, skillService, { batchSize: config.COLLECTION_WORKER_BATCH_SIZE, leaseMs: config.COLLECTION_LEASE_MS, maxAttempts: config.COLLECTION_MAX_DELIVERY_ATTEMPTS, retryBaseMs: config.COLLECTION_WORKER_INTERVAL_MS });
-  const skillValidationWorker = new SkillValidationWorker(skillRepository, skillService, { batchSize: config.COLLECTION_WORKER_BATCH_SIZE, leaseMs: config.COLLECTION_LEASE_MS, maxAttempts: config.COLLECTION_MAX_DELIVERY_ATTEMPTS, retryBaseMs: config.COLLECTION_WORKER_INTERVAL_MS }, new MySqlSkillFeedbackSink(pool, skillRepository));
+  const skillValidationWorker = new SkillValidationWorker(skillRepository, skillService, { batchSize: config.COLLECTION_WORKER_BATCH_SIZE, leaseMs: config.COLLECTION_LEASE_MS, maxAttempts: config.COLLECTION_MAX_DELIVERY_ATTEMPTS, retryBaseMs: config.COLLECTION_WORKER_INTERVAL_MS });
   const app = createApp(
     { projects, reviews, health, credentials, catalog, gateway, collection, skills: skillService }, config.ADMIN_API_KEY, config.HOST, config.MCP_ALLOWED_HOSTS,
-    { identity, repository, projects, reviews, health, credentials, statistics }, config.WEB_DIST_DIR, config.NODE_ENV === "production",
+    { identity, repository, projects, reviews, health, credentials, statistics, analysis: analysisRepository, skills: skillService }, config.WEB_DIST_DIR, config.NODE_ENV === "production",
   );
   const server = app.listen(config.PORT, config.HOST, () => { console.info(`LinkCli listening on http://${config.HOST}:${config.PORT}`); });
   const healthTimer = setInterval(() => { void health.probeActiveProjects(); void health.emitStaleAlerts(); }, Math.min(config.HEALTH_STALE_AFTER_MS / 2, 30_000));

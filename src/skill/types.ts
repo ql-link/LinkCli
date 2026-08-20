@@ -133,9 +133,12 @@ export interface SkillRepository {
   updateSkill(skill: Skill): Promise<void>;
   createValidationRun(run: SkillValidationRun): Promise<boolean>;
   findValidationRun(skillVersionId: string, trigger: ValidationTrigger, sampleSetHash: string): Promise<SkillValidationRun | null>;
+  listValidationRuns(skillId: string): Promise<SkillValidationRun[]>;
   createReview(review: SkillReview): Promise<boolean>;
   getReview(skillVersionId: string): Promise<SkillReview | null>;
   enqueueValidation(job: SkillValidationJob): Promise<boolean>;
+  findActiveValidationJob(skillVersionId: string, trigger: ValidationTrigger): Promise<SkillValidationJob | null>;
+  listValidationJobs(skillId: string): Promise<SkillValidationJob[]>;
   claimValidationJobs(workerId: string, now: Date, leaseMs: number, limit: number): Promise<SkillValidationJob[]>;
   completeValidationJob(jobId: string, workerId: string, at: Date): Promise<boolean>;
   failValidationJob(jobId: string, workerId: string, nextAttemptAt: Date, maxAttempts: number, errorCode: string): Promise<boolean>;

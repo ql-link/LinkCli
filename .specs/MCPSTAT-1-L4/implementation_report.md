@@ -11,7 +11,7 @@ L4 已形成从 L3 候选到 MCP Skill 运行时的闭环：候选事件通过�
 - `src/skill/service.ts`：生成、修订、验证排队、审核、灰度、启用、暂停、降级、废弃和依赖变更处理。
 - `src/skill/candidate-worker.ts`、`src/skill/validation-worker.ts`：候选和验证异步 Worker。
 - `src/skill/runtime.ts`：Skill MCP Tool 清单、灰度路由、步骤编排和 L2 关联。
-- `src/skill/repository.ts`、`src/skill/feedback.ts`：内存/MySQL 持久化和验证反馈回流。
+- `src/skill/repository.ts`：内存/MySQL 持久化，验证运行是验证结论的唯一事实源。
 - `src/gateway/catalog.ts`、`src/gateway/router.ts`：L1 清单挂载与 Skill 路由。
 - `src/collection/repository.ts`、`src/domain.ts`：L2 Skill 运行元数据。
 - `src/db/schema.sql`、`scripts/db/apply-analysis-schema.mjs`：Skill、验证队列、候选租约和 L2 关联字段。
@@ -21,7 +21,7 @@ L4 已形成从 L3 候选到 MCP Skill 运行时的闭环：候选事件通过�
 
 1. L3 将达标类别写入 `mcp_l4_candidate_outbox`。
 2. `SkillCandidateWorker` 获取租约，生成草稿和不可变 v1；失败按重试次数进入 dead 状态。
-3. Worker 为新版本创建 `mcp_skill_validation_jobs`；`SkillValidationWorker` 执行固定样本和 `AuthorityChecker`，并将结论写入验证运行及 `mcp_l4_validation_feedback`。
+3. Worker 为新版本创建 `mcp_skill_validation_jobs`；`SkillValidationWorker` 执行固定样本和 `AuthorityChecker`，并将结论写入 `mcp_skill_validation_runs`。
 4. 通过验证的版本进入待审核；审核通过进入 10% 灰度，显式激活后 exposure 为 100%。
 5. MCP `tools/list` 展示灰度/启用 Skill；调用按固定步骤执行底层 Tool，内部事件写入 L2。
 6. 依赖 Tool 变更可通过依赖事件接口暂停受影响 Skill 并排队定向验证；通过后仍需重新审核和灰度。
@@ -35,9 +35,9 @@ L4 已形成从 L3 候选到 MCP Skill 运行时的闭环：候选事件通过�
 实际执行：
 
 - `npm run typecheck`、`npm run typecheck:web`、`npm run build`：通过。
-- 全量测试：118 个通过，6 个 MySQL 用例在未配置测试库时跳过。
+- 全量测试：126 个通过，8 个 MySQL 用例在未配置测试库时跳过。
 - 本地真实 HTTP L4 E2E：480 条 L3 样本、8 个候选 Skill、异步验证、审核/激活、真实 Streamable HTTP 下游和 L2 采集全部通过。
-- 隔离 MySQL 8.0.42 L4 E2E：480 条 L3 样本、候选/Skill/验证队列/反馈持久化、真实 MCP HTTP 调用和带 Skill 关联字段的 `mcp_call_events` 全部通过。
+- 历史基线曾在隔离 MySQL 8.0.42 完成 L4 E2E；本次结构收敛后的真实 MySQL 复验结果以新的 Spec verify 为准，不沿用旧反馈表验证结论。
 - 隔离 MySQL L1/L3 回归：6 个测试全部通过。
 - `npm run spec -- check MCPSTAT-1-L4 implementation`：通过。
 
@@ -48,3 +48,7 @@ L4 已形成从 L3 候选到 MCP Skill 运行时的闭环：候选事件通过�
 - 真实 `AuthorityChecker` 必须使用只读副本/影子库，禁止连接生产主库；未配置时不得把 `insufficient` 视为通过。
 - 依赖 Tool 变更目前提供管理事件入口；生产应把 L1 版本发布/下线事件可靠投递到该入口。
 - 灰度指标自动晋级/自动回滚仍需接入真实 L2/L3 质量阈值配置。
+
+本轮质量复审已补齐四项边界：验证任务只在 `pending/running` 时占用活动幂等键，并发重复请求返回同一真实任务，完成或死信后允许再次人工复核；MySQL 只把真正的唯一键冲突视为幂等重复，外键及其他持久化错误不会被吞掉；控制台 Skill 详情展示验证任务和运行历史，活动任务期间自动刷新；旧反馈表只有在来源类别、Skill 版本、结论和两份 JSON 摘要精确等价时才允许删除；页面请求失败会显示可重试错误，不再伪装成空数据或无限加载。
+
+`linkcli_dev` 的验证任务表已复用开发环境 MySQL 配置完成增量列和索引切换，没有启动本地服务。MySQL 首次切换因旧唯一索引被外键复用而安全拒绝，未删除索引或数据；迁移脚本随后补充独立版本外键索引，再完成切换。事务烟测结果为首次插入 1、活动重复插入 0、任务完成后再次插入 1，全部烟测数据已回滚。真实旧反馈不一致阻断场景只允许在 `_test` 库执行，本次没有配置该隔离库，因此对应自动化用例保持跳过。

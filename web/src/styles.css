@@ -95,8 +95,11 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 }
 .status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #8e8e93; }
 .status.active::before, .status.healthy::before, .status.approved::before, .status.member::before { background: var(--success); }
+.status.success::before, .status.succeeded::before, .status.trusted::before, .status.canary::before { background: var(--success); }
 .status.unhealthy::before, .status.rejected::before, .status.retired::before, .status.revoked::before, .status.high::before { background: var(--error); }
+.status.error::before, .status.failed::before, .status.degraded::before { background: var(--error); }
 .status.pending::before, .status.pending_review::before, .status.draft::before, .status.medium::before, .status.reviewer::before { background: var(--warning); }
+.status.validating::before, .status.inferred::before, .status.paused::before { background: var(--warning); }
 .status.operator::before, .status.low::before { background: var(--ink); }
 
 .data-table { width: 100%; border-collapse: collapse; }

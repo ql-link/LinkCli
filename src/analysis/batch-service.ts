@@ -1,4 +1,4 @@
-import { averageVector, cosineSimilarity, sha256, sceneOf } from "./similarity.js";
+import { cosineSimilarity, sha256, sceneOf } from "./similarity.js";
 import type { EmbeddingProvider } from "./embedding-provider.js";
 import type { ClusterJudge, QueryAssignmentDecision } from "./cluster-judge.js";
 import type { AnalysisRepository } from "./repository.js";
@@ -32,6 +32,12 @@ interface PreparedAssignment {
   decisionType: "seed" | "exact_fingerprint" | "llm_existing" | "llm_new";
   decision: QueryAssignmentDecision;
   recalled: Array<{ clusterId: number; similarity: number }>;
+}
+
+function appendToCentroid(current: number[] | null, memberCount: number, vector: number[]): number[] {
+  if (!current || memberCount <= 0) return [...vector];
+  if (current.length !== vector.length) throw new Error("Cluster centroid dimension does not match input vector");
+  return current.map((value, index) => (value * memberCount + vector[index]!) / (memberCount + 1));
 }
 
 export class AnalysisBatchService {
@@ -119,15 +125,15 @@ export class AnalysisBatchService {
     }
     const scene = sceneOf(input.calls);
     const qualitySuccess = isQualitySuccess(input);
-    const inserted = await repository.addMember({ clusterId:cluster.id,analysisInputId:input.id,semanticSimilarity:prepared.similarity,queryVector:vector,sceneType:scene?.type??null,thresholdEligible:true,qualitySuccess,exclusionReason:null });
+    const centroid = appendToCentroid(cluster.centroidVector, cluster.sampleCount, vector);
+    const inserted = await repository.addMember({ clusterId:cluster.id,analysisInputId:input.id,semanticSimilarity:cosineSimilarity(vector,centroid),queryVector:vector,sceneType:scene?.type??null,thresholdEligible:true,qualitySuccess,exclusionReason:null });
     if (!inserted) { await repository.markAnalyzed(input.id, now); return { analyzed: true, skipped: true, candidate: false }; }
     if (scene) await repository.upsertScene({ clusterId:cluster.id,sceneKey:scene.key,sceneType:scene.type,toolPath:scene.toolPath,riskLevel:scene.risk,succeeded:qualitySuccess,occurredAt:input.occurredAt });
     if (input.attemptedSkillId) {
       const coverage = await this.coverage.evaluate(input);
       if (coverage && !coverage.covered) await repository.addCoverageGap({ clusterId:cluster.id,analysisInputId:input.id,attemptedSkillId:input.attemptedSkillId,attemptedSkillVersion:input.attemptedSkillVersion,gapType:coverage.gapType??"not_covered",evidence:coverage.evidence??{} });
     }
-    const memberVectors = await repository.listMemberVectors(cluster.id);
-    if (memberVectors.length) await repository.updateCentroid(cluster.id, averageVector(memberVectors), this.embeddings.modelVersion);
+    await repository.updateCentroid(cluster.id, centroid, this.embeddings.modelVersion);
     const current = await repository.recalculateCluster(cluster.id);
     await repository.appendScore(current.id,current.version,"cluster_assignment",prepared.decision.confidence,{
       inputId:input.id,decisionType:prepared.decisionType,judgeModelVersion:this.judge.modelVersion,reason:prepared.decision.reason,recalled:prepared.recalled,
@@ -135,7 +141,11 @@ export class AnalysisBatchService {
     await repository.appendScore(current.id,current.version,"cluster_quality",current.semanticCohesion,{ sampleCount:current.sampleCount,distinctActorCount:current.distinctActorCount,inputCompleteness:current.inputCompleteness,successRate:current.sampleCount?current.successCount/current.sampleCount:0,coverageGapCount:current.coverageGapCount });
     // 非语义兜底只用于影子观察。即使统计门槛碰巧满足，也不能把字面近似类别交给 L4。
     const candidate = this.candidateHandoffEnabled && this.embeddings.candidateHandoffEnabled !== false && this.judge.candidateHandoffEnabled !== false ? candidateType(current,this.thresholds) : null;
-    const alreadyHandedOff = candidate ? (await repository.listOutbox()).some((event) => event.clusterId === current.id && event.candidateType === candidate) : false;
+    const [sameVersionCandidate, latestCandidate] = candidate ? await Promise.all([
+      repository.hasCandidate(current.id, current.version, candidate),
+      repository.findLatestCandidate(current.id),
+    ]) : [false, null];
+    const alreadyHandedOff = Boolean(sameVersionCandidate || (current.status === "handed_off" && latestCandidate?.candidateType === candidate));
     const typeToSend = alreadyHandedOff ? null : candidate;
     let handedOff = false;
     if (typeToSend) {

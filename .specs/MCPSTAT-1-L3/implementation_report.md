@@ -2,7 +2,7 @@
 
 ## 1. 当前实现
 
-L2→L3 的完整轮次、Analysis Outbox、幂等输入、确定性 `Project + ordered Module Path` 分桶、场景统计、覆盖缺口和 L4 Outbox 边界保持不变。
+L2→L3 的完整轮次、Analysis Outbox、幂等输入、确定性 `Project + ordered Module Path` 分桶、场景统计、覆盖缺口和 L4 Outbox 边界保持不变。物理模型将一对一的类别成员字段及单一 attempted Skill 覆盖缺口并入 `mcp_analysis_input`，并以 `mcp_skill_validation_runs` 取代重复的 L4 反馈副本。
 
 本轮将桶内分类从“质心 cosine 超阈值即归类/合并”改为：
 
@@ -47,6 +47,10 @@ L2→L3 的完整轮次、Analysis Outbox、幂等输入、确定性 `Project + 
 - 实现严格意义的待聚合池；当前新类别仍先以 `observing` 单成员类别存在。
 - 完成模型版本迁移时的旧成员重新向量化。
 - 真实质量达标前保持 L4 投递关闭。
+
+本轮质量复审已补齐候选和在线更新边界：候选存在性使用索引查询，不再为单条输入读取完整 Outbox；同类型候选在类别保持 `handed_off` 时继续抑制，避免每个成员版本产生候选，不同候选类型仍可交付。在线归类按已有质心和成员数增量更新质心，不再读取并逐行改写全部成员；成员相似度的全量校准只在独立重建任务执行。
+
+新增回归验证了已交付类别持续新增样本不会重复产生同类型候选、`new_skill` 后仍可产生 `expand_skill`，以及在线归类不会调用全成员向量扫描。完整 `npm run check` 通过 126 项，8 项真实 MySQL 用例因本地没有测试库配置而跳过；本地 480 样本 L4 E2E 仍只产生 8 个候选。
 
 ## 6. 文档同步状态
 

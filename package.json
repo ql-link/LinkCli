@@ -18,7 +18,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "typecheck:web": "tsc -p web/tsconfig.json --noEmit",
     "test": "vitest run",
-    "test:mysql": "vitest run --no-file-parallelism tests/mysql-e2e.integration.test.ts tests/mysql-analysis.integration.test.ts",
+    "test:mysql": "vitest run --no-file-parallelism tests/mysql-e2e.integration.test.ts tests/mysql-analysis.integration.test.ts tests/mysql-schema-migration.integration.test.ts",
     "eval:l3": "tsx scripts/analysis/evaluate-l3-clustering.ts",
     "eval:l3:codex-smoke": "tsx scripts/analysis/smoke-codex-cli-judge.ts",
     "data:l4:e2e": "node --import tsx scripts/analysis/generate-l4-e2e-data.ts",

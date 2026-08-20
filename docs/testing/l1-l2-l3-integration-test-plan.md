@@ -200,7 +200,7 @@ L3 只消费 L2 已结算的完整轮次，按定时批次完成 Query 聚类和
 - Query/修改/删除等动作不能成为类别硬边界，但必须作为组内场景和风险证据保存。
 - 同一 Turn 的高 settlement version 必须幂等替代旧版本；已分析后不能静默改版。
 - 单条异常输入必须独立回滚并继续批次，不能阻塞后续输入。
-- 同一类型候选保持幂等，但 `new_skill` 后出现覆盖缺口仍可产生 `expand_skill`。
+- 同一类别、版本和类型的候选保持幂等；类别保持已交付状态时不因版本增长重复产生同类型候选，重新进入观察状态后才允许再次交付，`new_skill` 后出现覆盖缺口仍可产生 `expand_skill`。
 - 生产覆盖缺口判断依赖真实 Skill 元数据，不能用测试 Fake 冒充生产完成。
 
 ### 6.3 模块测试用例
@@ -267,7 +267,7 @@ L3 只消费 L2 已结算的完整轮次，按定时批次完成 Query 聚类和
 | ID | 场景 | 端到端步骤 | 最终断言 |
 |---|---|---|---|
 | E2E-18 | 已有 Skill 覆盖过窄 | 现有 Skill 只声明查询订单，实际出现删除订单 | L2 只记录 attempted Skill 事实；L3 识别 gap 并产生一次 `expand_skill` |
-| E2E-19 | 同类候选幂等 | 重跑 Worker、Batch 和候选写入 | `new_skill`/`expand_skill` 各至多一条，样本数不重复 |
+| E2E-19 | 状态感知候选幂等 | 重跑 Worker、Batch 和候选写入，再增加样本使类别版本增长 | 同一类别版本和类型只有一条；类别仍为已交付时不重复同类型候选，不同类型仍可交付，样本数不重复 |
 | E2E-20 | 全链路敏感信息 | Query 和参数包含虚构 token/password 字段 | 下游只收到业务所需参数；日志、响应、L2/L3 Outbox 不含秘密值 |
 
 ## 8. 数据库核对点
@@ -280,8 +280,8 @@ L3 只消费 L2 已结算的完整轮次，按定时批次完成 Query 聚类和
 | L2 | `mcp_call_outbox` | 调用前记录、完成状态、重试、租约和死信 |
 | L2 | `mcp_call_events`、`mcp_turns` | 轮次归属、质量、顺序、并行组、结算版本 |
 | L2→L3 | `mcp_analysis_outbox`、`mcp_analysis_input` | 结算版本幂等转换及字段来源完整性 |
-| L3 | `mcp_query_cluster`、`mcp_query_cluster_member`、`mcp_query_cluster_scene` | 类别、成员、场景和统计指标 |
-| L3→L4 | `mcp_skill_coverage_gap`、`mcp_l4_candidate_outbox` | 覆盖缺口和候选幂等性 |
+| L3 | `mcp_analysis_input`、`mcp_query_cluster`、`mcp_query_cluster_scene` | 输入的唯一类别归属、覆盖缺口、类别、场景和统计指标 |
+| L3→L4 | `mcp_l4_candidate_outbox` | 候选可靠交付和幂等性 |
 
 数据库核对只读取必要字段，不打印 Query、参数、结果或凭据正文。
 

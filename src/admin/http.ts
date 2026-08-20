@@ -102,7 +102,7 @@ export function createAdminRouter(services: AdminServices, adminApiKey: string):
   router.delete("/credentials/:id", requireRole(["platform_user", "owner", "reviewer", "operator"]), async (req, res) => { res.json(credentialView(await services.credentials.revoke(String(req.params.id), req.platformIdentity!.userId))); });
   if (services.skills) {
     router.get("/skills", requireRole(["owner", "reviewer", "operator"]), async (_req, res) => { res.json({ skills: await services.skills!.list() }); });
-    router.get("/skills/:id", requireRole(["owner", "reviewer", "operator"]), async (req, res) => { res.json({ skill: await services.skills!.get(String(req.params.id)) }); });
+    router.get("/skills/:id", requireRole(["owner", "reviewer", "operator"]), async (req, res) => { res.json(await services.skills!.detail(String(req.params.id))); });
     router.post("/skills/candidates", requireRole(["owner", "operator"]), async (req, res) => { const body = skillCandidateSchema.parse(req.body); res.status(201).json({ skill: await services.skills!.receiveCandidate(body) }); });
     router.post("/skills/:id/validate", requireRole(["owner", "operator"]), async (req, res) => { const body = skillValidationSchema.parse(req.body); res.status(202).json({ job: await services.skills!.enqueueValidation(String(req.params.id), body.trigger) }); });
     router.post("/skills/:id/revise", requireRole(["owner", "operator"]), async (req, res) => { const body = skillDefinitionSchema.parse(req.body); res.status(201).json(await services.skills!.revise(String(req.params.id), body, req.platformIdentity!.userId)); });

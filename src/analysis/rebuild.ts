@@ -83,7 +83,7 @@ export class ClusterRebuildJob {
         await transaction.mergeClusters(target.id, source.id);
         const vectors = await transaction.listMemberVectors(target.id);
         const centroid = vectors.length ? averageVector(vectors) : target.centroidVector;
-        if (centroid && target.embeddingModelVersion) await transaction.updateCentroid(target.id, centroid, target.embeddingModelVersion);
+        if (centroid && target.embeddingModelVersion) await transaction.rebuildCentroid(target.id, centroid, target.embeddingModelVersion);
         const current = await transaction.recalculateCluster(target.id);
         await transaction.appendScore(current.id,current.version,"cluster_merge",decision.confidence,{mergedClusterId:source.id,mergedClusterKey:source.clusterKey,judgeModelVersion:this.judge.modelVersion,reason:decision.reason,recallSimilarity:pair.similarity,modelVersion:target.embeddingModelVersion});
         return { ...current, centroidVector:centroid, embeddingModelVersion:target.embeddingModelVersion };
