@@ -18,21 +18,20 @@ verification:
   commands:
   - command: npm run check
     exit_code: 0
-    duration_ms: 13650
-    finished_at: '2026-08-20T06:36:42+00:00'
+    duration_ms: 15482
+    finished_at: '2026-08-20T06:48:32+00:00'
   code_snapshot:
-    sha256: 68faf77e3745c17aba24c36b9d4dc1ee06a5b8d5ac5dca083e1fb7ce3ee42a66
-    file_count: 164
-    head: c00c3d42f33536bb24717dbfd77d06ba30b72775
-    captured_at: '2026-08-20T06:36:42+00:00'
+    sha256: 52fa85125c7254716380e71b0b70135f22c2efd46bc957dbf9a23971d749af27
+    file_count: 163
+    head: ff987c5eeafea1488fcde53f43b2ed66516f2acc
+    captured_at: '2026-08-20T06:48:32+00:00'
   manual_acceptance: null
-  verified_at: '2026-08-20T06:36:42+00:00'
+  verified_at: '2026-08-20T06:48:32+00:00'
 quality_review:
   passed: true
   evidence:
-  - 代码审查通过：校验任务活动态幂等、迁移精确匹配保护、校验历史前端可观测及错误态均已覆盖；npm run check 通过，126 tests passed
-    / 8 MySQL tests safely skipped，开发库 DDL 与事务回滚冒烟通过。
-  code_snapshot_sha256: 68faf77e3745c17aba24c36b9d4dc1ee06a5b8d5ac5dca083e1fb7ce3ee42a66
-  reviewed_at: '2026-08-20T06:36:56+00:00'
+  - 基于提交 ff987c5 复核通过：npm run check 通过，126 tests passed / 8 MySQL tests safely skipped；校验任务幂等、迁移保护与前端可观测链路一致。
+  code_snapshot_sha256: 52fa85125c7254716380e71b0b70135f22c2efd46bc957dbf9a23971d749af27
+  reviewed_at: '2026-08-20T06:48:41+00:00'
 created_at: '2026-08-15T06:41:23+00:00'
-updated_at: '2026-08-20T06:36:56+00:00'
+updated_at: '2026-08-20T06:48:41+00:00'
