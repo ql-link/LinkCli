@@ -88,3 +88,7 @@ LINKCLI_TEST_MYSQL_URL='mysql://<user>:<password>@127.0.0.1:<port>/<linkcli_test
 ## 团队的其他产品
 
 [DrawOffer 职绘](https://www.drawoffer.com) 是同一团队开发的 AI 求职工具：AI 改简历、按岗位 JD 调整简历、AI 模拟面试与求职进度管理。
+
+## 许可证
+
+本项目基于 [MIT License](LICENSE) 开源。目录中自带许可证文件的第三方代码以各自的许可证为准。
