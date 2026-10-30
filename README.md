@@ -84,3 +84,11 @@ LINKCLI_TEST_MYSQL_URL='mysql://<user>:<password>@127.0.0.1:<port>/<linkcli_test
 ```
 
 该 L4 测试会验证候选 Outbox、Skill 版本、异步验证队列、验证运行、审核/激活、真实 MCP 调用及带 Skill 关联字段的 L2 Call Event；测试库会在前后清理，禁止使用共享或生产数据库。`npm run test:mysql` 还会在库名以 `_test` 结尾时执行旧 17 表到当前 14 表的破坏性迁移回归；连接 `_dev` 时该用例自动跳过。
+
+## 团队的其他产品
+
+[DrawOffer 职绘](https://www.drawoffer.com) 是同一团队开发的 AI 求职工具：AI 改简历、按岗位 JD 调整简历、AI 模拟面试与求职进度管理。
+
+## 许可证
+
+本项目基于 [MIT License](LICENSE) 开源。目录中自带许可证文件的第三方代码以各自的许可证为准。
